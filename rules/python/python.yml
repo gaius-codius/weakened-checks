@@ -1,0 +1,11 @@
+# Python tests skipped by decorator or call.
+id: py-test-skip
+language: python
+severity: warning
+message: a test is skipped
+rule:
+  any:
+    - kind: decorator
+      regex: '^@\s*(pytest\.mark\.(skip|skipif|xfail)|unittest\.(skip|skipIf|skipUnless|expectedFailure))\b'
+    - kind: call
+      regex: '^(pytest\.skip|self\.skipTest)\s*\('

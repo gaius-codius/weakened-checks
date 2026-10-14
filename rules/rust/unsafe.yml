@@ -1,0 +1,27 @@
+# Unsafe code: blocks, functions, impls, traits, extern blocks and unsafe
+# attributes. Reported at the line holding `unsafe` (metadata.anchor), so
+# editing inside an existing unsafe block isn't a new finding.
+id: rust-unsafe
+language: rust
+severity: warning
+message: unsafe code
+metadata:
+  anchor: start
+rule:
+  any:
+    - kind: unsafe_block
+    - kind: function_modifiers
+      regex: '\bunsafe\b'
+    - kind: impl_item
+      regex: '^unsafe\b'
+    - kind: trait_item
+      regex: '^(pub(\([^)]*\))?\s+)?unsafe\b'
+    - kind: foreign_mod_item
+      regex: '^unsafe\b'
+    - kind: identifier
+      regex: '^unsafe$'
+      inside:
+        stopBy: end
+        any:
+          - kind: attribute_item
+          - kind: inner_attribute_item

@@ -1,0 +1,38 @@
+name: Weakened checks are explained
+description: >
+  Reports the changes a pull request makes that weaken or bypass a check (a
+  silenced lint, a skipped or deleted test, a loosened bound, changed check
+  config). Advisory findings pass when the PR body has a "Check changes:" line
+  explaining them; prohibited findings fail unless the repository's exceptions
+  file allows them. Needs the checkout's full history (fetch-depth 0).
+inputs:
+  base:
+    description: Commit the change is compared with. Defaults to the pull request's base.
+    default: ${{ github.event.pull_request.base.sha }}
+  head:
+    description: Commit that is checked. Defaults to the pull request's head.
+    default: ${{ github.event.pull_request.head.sha }}
+  pr-body:
+    description: Text searched for the "Check changes:" line. Defaults to the pull request's body.
+    default: ${{ github.event.pull_request.body }}
+  config:
+    description: >
+      Config path from the repository root, read from the base (or the head,
+      when the base has none). With the default path, a repository with no
+      config gets the built-in defaults.
+    default: .github/weakened-checks.conf
+  working-directory:
+    description: The repository's checkout, relative to the workspace.
+    default: .
+runs:
+  using: composite
+  steps:
+    - name: Check for weakened checks
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        WC_BASE: ${{ inputs.base }}
+        WC_HEAD: ${{ inputs.head }}
+        WC_CONFIG: ${{ inputs.config }}
+        PR_BODY: ${{ inputs.pr-body }}
+      run: '"$GITHUB_ACTION_PATH/scripts/action.sh"'
