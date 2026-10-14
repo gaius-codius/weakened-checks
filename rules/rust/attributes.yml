@@ -1,0 +1,67 @@
+# Rust attributes that silence a lint, skip a test, skip formatting or export
+# an unmangled symbol, outer (#[...]) or inner (#![...]), also inside
+# cfg_attr. Matched on the syntax tree, so the words in a string (a doc
+# attribute, say) don't count.
+id: rust-allow
+language: rust
+severity: warning
+message: a lint is allowed or expected
+rule:
+  any:
+    - kind: attribute_item
+    - kind: inner_attribute_item
+  has:
+    stopBy: end
+    kind: identifier
+    regex: '^(allow|expect)$'
+    precedes:
+      kind: token_tree
+---
+id: rust-ignore
+language: rust
+severity: warning
+message: a test is ignored
+rule:
+  any:
+    - kind: attribute_item
+    - kind: inner_attribute_item
+  has:
+    stopBy: end
+    kind: identifier
+    regex: '^ignore$'
+---
+id: rust-rustfmt-skip
+language: rust
+severity: warning
+message: formatting is skipped
+rule:
+  any:
+    - kind: attribute_item
+    - kind: inner_attribute_item
+  has:
+    stopBy: end
+    any:
+      - kind: scoped_identifier
+        regex: '^rustfmt\s*::\s*skip$'
+      - kind: identifier
+        regex: '^rustfmt_skip$'
+      - kind: identifier
+        regex: '^skip$'
+        follows:
+          regex: '^::$'
+          follows:
+            kind: identifier
+            regex: '^rustfmt$'
+---
+id: rust-no-mangle
+language: rust
+severity: warning
+message: a symbol is exported unmangled
+rule:
+  kind: identifier
+  regex: '^no_mangle$'
+  inside:
+    stopBy: end
+    any:
+      - kind: attribute_item
+      - kind: inner_attribute_item

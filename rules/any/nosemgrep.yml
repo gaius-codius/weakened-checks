@@ -1,0 +1,52 @@
+# A semgrep suppression in a comment, in each language the detector parses
+# (Svelte has its own check in check-weakened.sh). Each id carries
+# @language, since ast-grep wants ids unique; the detector drops it.
+id: nosemgrep@rust
+language: rust
+severity: warning
+message: a semgrep finding is suppressed
+rule:
+  any:
+    - kind: line_comment
+    - kind: block_comment
+  regex: '\bnosemgrep\b'
+---
+id: nosemgrep@go
+language: go
+severity: warning
+message: a semgrep finding is suppressed
+rule:
+  kind: comment
+  regex: '\bnosemgrep\b'
+---
+id: nosemgrep@typescript
+language: typescript
+severity: warning
+message: a semgrep finding is suppressed
+rule:
+  kind: comment
+  regex: '\bnosemgrep\b'
+---
+id: nosemgrep@tsx
+language: tsx
+severity: warning
+message: a semgrep finding is suppressed
+rule:
+  kind: comment
+  regex: '\bnosemgrep\b'
+---
+id: nosemgrep@python
+language: python
+severity: warning
+message: a semgrep finding is suppressed
+rule:
+  kind: comment
+  regex: '\bnosemgrep\b'
+---
+id: nosemgrep@bash
+language: bash
+severity: warning
+message: a semgrep finding is suppressed
+rule:
+  kind: comment
+  regex: '\bnosemgrep\b'

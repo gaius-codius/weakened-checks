@@ -1,0 +1,24 @@
+# Go: a golangci-lint suppression, and a test that skips itself.
+id: go-nolint
+language: go
+severity: warning
+message: a lint is suppressed with //nolint
+rule:
+  kind: comment
+  regex: '^//\s?nolint\b'
+---
+id: go-test-skip
+language: go
+files:
+  - '**/*_test.go'
+  - '*_test.go'
+severity: warning
+message: a test skips itself
+rule:
+  kind: call_expression
+  has:
+    field: function
+    kind: selector_expression
+    has:
+      field: field
+      regex: '^(Skip|Skipf|SkipNow)$'
