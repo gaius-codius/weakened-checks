@@ -33,8 +33,11 @@ jobs:
       - name: Run the suites ported from nota and conspector
         run: tests/run-ported.sh
 
+      - name: Test the Claude Code hook
+        run: tests/test-protect-hook.sh
+
       - name: Shellcheck
-        run: shellcheck check-weakened.sh scripts/*.sh tests/*.sh tests/ported/extract.sh
+        run: shellcheck -x check-weakened.sh lib/*.bash agent/*.sh scripts/*.sh tests/*.sh tests/ported/extract.sh
 
       - name: Actionlint
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color

@@ -17,7 +17,7 @@ trap 'rm -rf "$tmp"' EXIT
 echo 'fn f() {}' >"$tmp/a.rs"
 (cd "$tmp" && "$sg" scan -c "$root/rules/sgconfig.yml" a.rs >/dev/null) || fail "the rules don't load"
 
-known=$(sed -n '/^rules=(/,/)$/p' "$root/check-weakened.sh" | tr -s ' ()' '\n')
+known=$(sed -n '/^rules=(/,/)$/p' "$root/lib/config.bash" | tr -s ' ()' '\n')
 while IFS= read -r id; do
   grep -qxF "${id%@*}" <<<"$known" || fail "rule $id isn't one check-weakened.sh knows"
 done < <(grep -h '^id: ' "$root"/rules/*/*.yml | cut -d' ' -f2 | sort -u)
