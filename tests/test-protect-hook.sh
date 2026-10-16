@@ -67,7 +67,7 @@ run_json() {
   code=$?
   [[ ${code} -eq 0 ]] || ok=0
   case "${want}" in
-    ask) [[ "${out}" == *'"permissionDecision": "ask"'* && "${out}" == *'"hookEventName": "PreToolUse"'* ]] || ok=0 ;;
+    ask) [[ "${out}" =~ \"permissionDecision\":\ ?\"ask\" && "${out}" =~ \"hookEventName\":\ ?\"PreToolUse\" ]] || ok=0 ;;
     silent) [[ -z "${out}" ]] || ok=0 ;;
     context) [[ "${out}" == *'"additionalContext"'* && "${out}" != *permissionDecision* ]] || ok=0 ;;
   esac
@@ -410,6 +410,84 @@ edit "opt-out: Edit is silent" deny.toml '[bans]' '' silent
 write "opt-out: Write is silent" deny.toml 'x' silent
 bash_cmd "opt-out: Bash is silent" "sed -i 's/a/b/' deny.toml" silent
 unset WEAKENED_CHECKS_PROTECT_CONFIG
+
+# ---------------------------------------------------------------------------
+# New: changes the first version of this hook let through.
+# ---------------------------------------------------------------------------
+
+new_repo
+mkdir -p "${r}/src"
+printf '#![deny(warnings)]\n#[allow(dead_code)]\n#[cfg(test)]\nmod t {}\n' >"${r}/crates/lib/src/lib.rs"
+edit "an Edit of part of an #[allow(..)] that widens it asks" crates/lib/src/lib.rs 'dead_code)]' 'dead_code, clippy::all)]' ask "dead_code, clippy::all"
+edit "an Edit turning deny(warnings) into allow(warnings) asks" crates/lib/src/lib.rs 'deny(warnings)' 'allow(warnings)' ask
+edit "an Edit turning cfg(test) into cfg(false) asks" crates/lib/src/lib.rs 'cfg(test)' 'cfg(false)' ask
+printf 'const a = 1;\n// @ts-expect-error: because upstream types\nfoo(a);\n' >"${r}/src/b.ts"
+edit "an Edit dropping a @ts-expect-error's reason asks" src/b.ts ': because upstream types' '' ask "@ts-expect-error"
+printf 'func TestA(t *testing.T) {\n\tt.Log("x")\n}\n' >"${r}/a_test.go"
+edit "an Edit turning t.Log into t.Skip asks" a_test.go 'Log' 'Skip' ask
+printf 'test.skipIf(false)("a", () => {});\n' >"${r}/src/c.test.ts"
+edit "an Edit enabling a skipIf asks" src/c.test.ts 'false' 'true' ask "skipIf(true)"
+edit "test.skip.each asks" src/c.test.ts 'test.skipIf(false)("a", () => {});' 'test.skip.each([1, 2])("case", () => {});' ask
+printf '[package]\nname = "deny"\n\n[lints.rust]\nunused = "deny"\n' >"${r}/crates/lib/Cargo.toml"
+run_json "a replace_all Edit reaching the lints table asks" "$(jq -n --arg f "${r}/crates/lib/Cargo.toml" \
+  '{tool_name: "Edit", tool_input: {file_path: $f, old_string: "\"deny\"", new_string: "\"allow\"", replace_all: true}}')" ask "[workspace.lints]"
+yes 'const filler = 1;' | head -n 20000 >"${r}/src/big.ts"
+printf '// x\n' >>"${r}/src/big.ts"
+edit "a suppression added to a file over 128 KiB asks" src/big.ts '// x' '// @ts-ignore' ask
+
+new_repo
+commit_conf 'config-path @defaults :(exclude).github/**'
+write "an :(exclude) in the config doesn't unprotect the config" .github/weakened-checks.conf 'disable check-config' ask ".github/weakened-checks.conf is check config"
+write "an :(exclude) in the config doesn't unprotect the exceptions file" .github/weakened-checks-exceptions 'x' ask
+
+new_repo
+commit_conf 'frobnicate x
+config-path extra/*.cfg'
+mkdir -p "${r}/extra" && printf 'x\n' >"${r}/extra/a.cfg"
+write "a config that doesn't parse protects new files its glob matches" extra/new.cfg 'x' ask "extra/new.cfg is check config"
+
+new_repo
+ln -s deny.toml "${r}/alias.toml"
+edit "an Edit through a symlink to a protected file asks" alias.toml '[bans]' '' ask "deny.toml is check config"
+bash_cmd "tee through a symlink to a protected file asks" "printf 'x\\n' | tee alias.toml" ask "deny.toml"
+rm -f "${r}/alias.toml"
+bash_cmd "sed -i.bak asks" "sed -i.bak 's/deny/allow/' deny.toml" ask
+bash_cmd "sed by its full path asks" "/usr/bin/sed -i 's/deny/allow/' deny.toml" ask
+bash_cmd "git -C . restore asks" "git -C . restore deny.toml" ask
+bash_cmd "a >| redirect asks" "echo x >| .github/workflows/ci.yml" ask
+bash_cmd "dd of= asks" "dd if=/dev/null of=deny.toml" ask
+bash_cmd "pnpm install with tsconfig.json named is silent" "pnpm install && pnpm exec tsc -p tsconfig.json --noEmit" silent
+long="cat > .github/workflows/ci.yml <<'EOF'"$'\n'"$(yes 'run: echo step done here' | head -n 1000)"$'\n'"EOF"
+start=${SECONDS}
+bash_cmd "a long heredoc into a workflow asks" "${long}" ask
+((SECONDS - start < 8)) || { echo "FAIL a long heredoc took $((SECONDS - start))s"; failures=$((failures + 1)); }
+
+# shellcheck disable=SC2016 # the command text is meant literally.
+bash_cmd "a redirect to \$PWD/deny.toml asks" 'printf x > "$PWD/deny.toml"' ask
+# shellcheck disable=SC2016 # the command text is meant literally.
+bash_cmd "sed -i on \$(pwd)/deny.toml asks" 'sed -i s/a/b/ "$(pwd)/deny.toml"' ask
+bash_cmd "git checkout of the whole tree asks" "git checkout HEAD -- ." ask "the whole repository"
+bash_cmd "git restore . asks" "git restore ." ask
+bash_cmd "git add . is silent" "git add . && git status" silent
+bash_cmd "Bash t.Skip into a non-test .go file is silent" "printf 't.Skip()\\n' >> a.go" silent
+bash_cmd "Bash latest.only( into a .ts file is silent" "printf 'latest.only()\\n' >> src/a.ts" silent
+norp="${work}/norealpath"
+mkdir -p "${norp}"
+for t in bash env git jq dirname basename sed head grep cat mktemp rm tr readlink; do
+  ln -s "$(command -v "${t}")" "${norp}/${t}"
+done
+HOOK_PATH="${norp}" write "without realpath a protected Write still asks" deny.toml 'x' ask "deny.toml is check config"
+
+fakejq="${work}/fakejq"
+mkdir -p "${fakejq}" && printf '#!/bin/sh\nexit 1\n' >"${fakejq}/jq" && chmod +x "${fakejq}/jq"
+HOOK_PATH="${fakejq}:${PATH}" write "a jq that fails still gives JSON, never silence" deny.toml 'x' context "could not read the hook input"
+
+mkdir -p "${work}/tmpdir"
+TMPDIR="${work}/tmpdir" write "a protected Write (for the scratch check)" deny.toml 'x' ask
+TMPDIR="${work}/tmpdir" bash_cmd "a Bash command (for the scratch check)" "ls" silent
+total=$((total + 1))
+if [[ -z "$(ls -A "${work}/tmpdir")" ]]; then echo "ok   the hook leaves no scratch directories"; else
+  echo "FAIL the hook left scratch directories: $(ls -A "${work}/tmpdir")"; failures=$((failures + 1)); fi
 
 echo "${total} cases"
 if [[ ${failures} -ne 0 ]]; then

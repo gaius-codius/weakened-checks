@@ -28,11 +28,14 @@
 #     test skip/only; svelte-ignore; Python skips; nosemgrep. A rule the
 #     config disables doesn't ask. "x as unknown as T" outside the test paths
 #     only adds context, unless the config prohibits ts-as-unknown there and
-#     the exceptions file (read from HEAD) doesn't allow it.
+#     the exceptions file (read from HEAD) doesn't allow it. An Edit is
+#     applied to the file before the comparison, and a symlink is judged by
+#     its own name and its destination.
 #   - Bash, best effort: a command that names a protected path (or a
 #     directory holding one) and writes with sed -i, perl -i, tee, mv, cp,
-#     rm, truncate, ln, install, patch or git checkout/restore/rm/mv/apply,
-#     or redirects into one; a Cargo.toml with "lints"; a source file with a
+#     rm, truncate, ln, install, patch, dd or git checkout/restore/rm/mv/apply,
+#     or redirects into one (paths resolved against cwd, so a cd earlier in
+#     the command isn't followed); a Cargo.toml with "lints"; a source file with a
 #     suppression. A write through any other program is not seen.
 #
 # Outcomes:
@@ -41,8 +44,8 @@
 #   exit 0, nothing: anything else, outside a git repository, or
 #     WEAKENED_CHECKS_PROTECT_CONFIG=off.
 #   exit 0 with JSON additionalContext: an advisory note, or the check could
-#     not run (jq or git missing, input jq can't read, lib/ missing, bash
-#     older than 4.3). Never blocks, never silent.
+#     not run (jq or git missing or failing, input jq can't read, lib/ missing, bash
+#     older than 4.4). Never blocks, never silent.
 set -uo pipefail
 
 opt_out="Set WEAKENED_CHECKS_PROTECT_CONFIG=off to turn this hook off."
@@ -50,23 +53,33 @@ cfg_file=.github/weakened-checks.conf
 cfg_note=""
 
 # say <message>: tell the agent something without blocking, then exit 0.
-say() {
-  local m="weakened-checks hook: $1"
-  if command -v jq >/dev/null 2>&1; then
-    jq -n --arg m "$m" '{hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $m}}'
+# emit <field> <text>: the hook's JSON with one field, through jq, or written
+# out by hand when jq is missing or fails.
+emit() {
+  local key=$1 m=$2
+  if command -v jq >/dev/null 2>&1 &&
+    jq -n --arg k "$key" --arg m "$m" '{hookSpecificOutput: ({hookEventName: "PreToolUse"} +
+      if $k == "ask" then {permissionDecision: "ask", permissionDecisionReason: $m} else {additionalContext: $m} end)}' 2>/dev/null; then
+    return 0
+  fi
+  m=${m//\\/\\\\}; m=${m//\"/\\\"}; m=${m//$'\n'/\\n}; m=${m//$'\t'/\\t}; m=${m//$'\r'/\\r}
+  if [[ $key == ask ]]; then
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}\n' "$m"
   else
-    m=${m//\\/\\\\}; m=${m//\"/\\\"}; m=${m//$'\n'/\\n}; m=${m//$'\t'/\\t}
     printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"%s"}}\n' "$m"
   fi
+}
+
+say() {
+  emit context "weakened-checks hook: $1"
   exit 0
 }
 
-# ask <reason>: hand the decision to the user, then exit 0. Only called with jq.
+# ask <reason>: hand the decision to the user, then exit 0.
 ask() {
   local r="weakened-checks hook: $1"
   [[ -z $cfg_note ]] || r+=" $cfg_note"
-  jq -n --arg r "$r $opt_out" \
-    '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: $r}}'
+  emit ask "$r $opt_out"
   exit 0
 }
 
@@ -80,11 +93,12 @@ done_quiet() {
 
 input=$(cat)
 
-if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
-  say "bash ${BASH_VERSION} is older than 4.3, so this change was not checked for weakened checks."
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+  say "bash ${BASH_VERSION} is older than 4.4, so this change was not checked for weakened checks."
 fi
 command -v git >/dev/null 2>&1 || say "git is not on PATH, so this change was not checked for weakened checks."
-self=$(realpath -- "${BASH_SOURCE[0]}" 2>/dev/null) || self=${BASH_SOURCE[0]}
+self=$(realpath -- "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null) ||
+  self=${BASH_SOURCE[0]}
 lib=$(dirname -- "$self")/../lib/config.bash
 [[ -r $lib ]] || say "$lib is missing (the hook must be a symlink into a clone of weakened-checks), so this change was not checked for weakened checks."
 # shellcheck source=lib/config.bash
@@ -94,6 +108,10 @@ cfg_error=""
 wc_config_error() { cfg_error=$1; }
 
 scratch=""
+
+# phys_dir <existing dir>: the directory with symlinks resolved, without
+# needing realpath.
+phys_dir() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
 
 # abs_path <path> <cwd>: <path> made absolute with its nearest existing
 # directory resolved. The file itself is not resolved: a symlinked
@@ -107,8 +125,26 @@ abs_path() {
     rest="$(basename -- "$d")/$rest"
     d=$(dirname -- "$d")
   done
-  d=$(realpath -- "$d") || return 1
+  d=$(phys_dir "$d") || return 1
   printf '%s/%s\n' "${d%/}" "$rest"
+}
+
+# lexical_path <path> <resolved cwd>: <path> made absolute, with . and ..
+# resolved as text and no process started: a long command has many words.
+lexical_path() {
+  local p=$1 part
+  [[ $p == /* ]] || p="$2/$p"
+  local -a parts kept=()
+  IFS=/ read -r -a parts <<<"$p"
+  for part in "${parts[@]}"; do
+    case $part in
+      '' | .) ;;
+      ..) ((${#kept[@]} == 0)) || unset 'kept[-1]' ;;
+      *) kept+=("$part") ;;
+    esac
+  done
+  local IFS=/
+  printf '/%s\n' "${kept[*]}"
 }
 
 # repo_root <dir>: the git repository's root of <dir>, or of its nearest
@@ -117,7 +153,7 @@ repo_root() {
   local d=$1 r
   while [[ ! -d $d ]]; do d=$(dirname -- "$d"); done
   r=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || return 1
-  realpath -- "$r"
+  phys_dir "$r"
 }
 
 # default_ref <root>: the default branch, as the first ref that exists.
@@ -143,12 +179,12 @@ load_config() {
   if ! wc_parse_config "$text" "$name"; then
     # Don't narrow what's protected: the built-in list and every pathspec
     # the config names.
-    local extra
-    extra=$(sed -nE 's/[[:space:]]+#.*$//; s/^[[:space:]]*config-path[[:space:]]+//p' <<<"$text" | tr -s ' \t' '\n' | grep -vx '@defaults')
+    local -a extra
+    mapfile -t extra < <(sed -nE 's/[[:space:]]+#.*$//; s/^[[:space:]]*config-path[[:space:]]+//p' <<<"$text" |
+      tr -s ' \t' '\n' | grep -vx -e '@defaults' -e '')
     wc_reset
     wc_parse_config "" ""
-    # shellcheck disable=SC2206 # pathspecs have no spaces in the config either.
-    config_paths=("${default_config_paths[@]}" $extra)
+    config_paths=("${default_config_paths[@]}" "${extra[@]}")
     cfg_note="($cfg_error: the config did not parse, so the built-in check-config list and the config's config-path entries are protected.)"
   fi
   cfg_error=""
@@ -156,30 +192,41 @@ load_config() {
   if [[ $exceptions_path != none ]] && ex=$(git -C "$root" show "HEAD:$exceptions_path" 2>/dev/null); then
     wc_parse_exceptions "$ex" || exceptions=()
   fi
-  protected=("$cfg_file" .github/weakened-checks-exceptions)
-  [[ $exceptions_path == none ]] || protected+=("$exceptions_path")
+  # The config and the exceptions file are matched by name, so no pathspec
+  # in the config (an :(exclude), say) can take them out.
+  mandatory=("$cfg_file" .github/weakened-checks-exceptions)
+  [[ $exceptions_path == none ]] || mandatory+=("$exceptions_path")
+  protected=("${mandatory[@]}")
   if on check-config; then protected+=("${config_paths[@]}"); fi
-}
-
-# scratch_dir: a directory for throwaway git indexes, made once.
-scratch_dir() {
-  [[ -n $scratch ]] || scratch=$(mktemp -d) || return 1
 }
 
 # protected_matches <root> <relative path>...: prints those that match the
 # protected pathspecs, by git's own pathspec rules: the paths go into a
 # throwaway index (they needn't exist) and ls-files picks the matches.
+# Returns 1 when git fails, so the caller can say so.
 protected_matches() {
-  local root=$1 idx
+  local root=$1 idx p m ok=0
   shift
   (($# > 0)) || return 0
-  scratch_dir || return 1
-  idx=$scratch/index.$RANDOM
-  printf '100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\t%s\0' "$@" |
-    GIT_INDEX_FILE=$idx git -C "$root" update-index --add -z --index-info 2>/dev/null
-  GIT_INDEX_FILE=$idx git -C "$root" -c core.quotePath=false ls-files -- "${protected[@]}" 2>/dev/null
+  for p in "$@"; do
+    for m in "${mandatory[@]}"; do [[ $p == "$m" ]] && printf '%s\n' "$p"; done
+  done
+  # git refuses some paths (.git/..., a path with ..) in an index; those
+  # aren't check config, so they're left out rather than failing the rest.
+  local -a valid=()
+  for p in "$@"; do
+    [[ $p == .git || $p == .git/* || /$p/ == */../* || /$p/ == */./* ]] || valid+=("$p")
+  done
+  ((${#valid[@]} > 0)) || return 0
+  idx=$scratch/index.$BASHPID
+  printf '100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\t%s\0' "${valid[@]}" |
+    GIT_INDEX_FILE=$idx git -C "$root" update-index --add -z --index-info 2>/dev/null &&
+    GIT_INDEX_FILE=$idx git -C "$root" -c core.quotePath=false ls-files -- "${protected[@]}" 2>/dev/null ||
+    ok=1
   rm -f "$idx"
+  return "$ok"
 }
+git_failed="git could not match paths against the check-config list, so this change was not checked for weakened checks."
 
 # lang <relative path>: the suppression rules that apply, by file type.
 lang() {
@@ -213,7 +260,8 @@ ts-ignore	@ts-ignore\\b$cmt
 ts-expect-error	@ts-expect-error[ \\t:-]*(?:\\*/[ \\t]*)?(?=\\n|$)
 eslint-disable	\\beslint-disable$cmt
 biome-ignore	\\bbiome-ignore$cmt
-js-test-skip	(?<![A-Za-z0-9_\$.])(?:(?:it|test|describe|suite|bench)(?:\\.(?:concurrent|sequential))?\\.(?:skip|only|todo|skipIf|runIf)|x(?:it|test|describe))[ \\t]*\\(
+js-test-skip	(?<![A-Za-z0-9_\$.])(?:(?:it|test|describe|suite|bench)(?:\\.(?:concurrent|sequential))?\\.(?:skip|only|todo)(?:\\.[A-Za-z]+)*|x(?:it|test|describe)(?:\\.[A-Za-z]+)*)[ \\t]*\\(
+js-test-skip	(?<![A-Za-z0-9_\$.])(?:it|test|describe|suite|bench)(?:\\.(?:concurrent|sequential))?\\.(?:skipIf|runIf)[ \\t]*\\([^)\\n]*\\)?
 ts-as-unknown	\\bas[ \\t\\n]+unknown[ \\t\\n]+as\\b"
 rules_by[svelte]="${rules_by[ts]}
 svelte-ignore	svelte-ignore(?:(?!-->)[^\\n])*"
@@ -236,8 +284,9 @@ rules_for() {
 
 # Bash's view of the same suppressions (EREs), by language.
 ere_by[rust]='#!?\[(allow|expect)\(|cfg_attr\(.*(allow|expect|ignore)|#\[ignore|cfg\((any\(\)|not\(all\(\)\)|false)\)|rustfmt::skip|rustfmt_skip'
-ere_by[go]='//[[:space:]]?nolint|\.Skip(f|Now)?\('
-ere_by[ts]='@ts-(nocheck|ignore|expect-error)|eslint-disable|biome-ignore|(it|test|describe|suite|bench)(\.(concurrent|sequential))?\.(skip|only|todo|skipIf|runIf)|(^|[^[:alnum:]_$.])x(it|test|describe)[[:space:]]*\('
+ere_by[go]='//[[:space:]]?nolint'
+ere_by[gotest]='//[[:space:]]?nolint|\.Skip(f|Now)?\('
+ere_by[ts]='@ts-(nocheck|ignore|expect-error)|eslint-disable|biome-ignore|(^|[^[:alnum:]_$.])(it|test|describe|suite|bench)(\.(concurrent|sequential))?\.(skip|only|todo|skipIf|runIf)|(^|[^[:alnum:]_$.])x(it|test|describe)[[:space:]]*\('
 ere_by[svelte]="${ere_by[ts]}|svelte-ignore"
 ere_by[python]='pytest\.mark\.(skip|skipif|xfail)|unittest\.(skip|expectedFailure)|pytest\.skip|skipTest'
 ere_any='nosemgrep'
@@ -249,7 +298,8 @@ relevant() {
 }
 
 main() {
-  trap '[[ -z $scratch ]] || rm -rf "$scratch"' EXIT
+  scratch=$(mktemp -d) || say "mktemp failed, so this change was not checked for weakened checks."
+  trap 'rm -rf "$scratch"' EXIT
   if ! command -v jq >/dev/null 2>&1; then
     # Best effort without jq, only to decide whether the change is ours to
     # report on.
@@ -289,19 +339,30 @@ main() {
 judge_file() {
   local tool=$1 file=$2 cwd=$3 abs root rel
   [[ -n $file ]] || exit 0
-  abs=$(abs_path "$file" "$cwd") || exit 0
+  abs=$(abs_path "$file" "$cwd") || say "could not resolve $file, so this change was not checked for weakened checks."
   root=$(repo_root "$(dirname -- "$abs")") || exit 0
   [[ $abs == "$root"/* ]] || exit 0
   rel=${abs#"$root"/}
   load_config "$root"
 
-  if [[ -n $(protected_matches "$root" "$rel") ]]; then
-    ask "$rel is check config: it sets what CI, the hooks or the weakened-checks detector check. Changing it can weaken them, so a human approves this edit."
+  # A symlink is judged by its own name and by the file it writes to.
+  local -a names=("$rel")
+  local dest
+  if [[ -L $abs ]] && dest=$(realpath -m -- "$abs" 2>/dev/null) && [[ $dest == "$root"/* ]]; then
+    names+=("${dest#"$root"/}")
+  fi
+  local hit
+  hit=$(protected_matches "$root" "${names[@]}") || say "$git_failed"
+  hit=${hit%%$'\n'*}
+  if [[ -n $hit ]]; then
+    ask "$hit is check config: it sets what CI, the hooks or the weakened-checks detector check. Changing it can weaken them, so a human approves this edit."
   fi
 
-  # The current content ("" for a new file).
-  local cur=""
-  [[ -f $abs ]] && cur=$(cat -- "$abs"; printf x) && cur=${cur%x}
+  # The current content, as a file for jq (empty for a new file): a large
+  # file doesn't fit in one argument.
+  local cur=$scratch/empty
+  : >"$cur"
+  [[ -f $abs && -r $abs ]] && cur=$abs
 
   if [[ $rel == Cargo.toml || $rel == */Cargo.toml ]]; then
     on cargo-lint-levels || done_quiet
@@ -316,13 +377,22 @@ judge_file() {
   rules=$(rules_for "$l") || say "could not build the suppression rules with jq, so this change to $rel was not checked."
   # The suppressions the new text holds more often than the old, as
   # "rule<TAB>text" lines.
-  added=$(printf '%s' "$input" | jq -r --arg cur "$cur" --argjson rules "$rules" '
+  added=$(printf '%s' "$input" | jq -r --rawfile cur "$cur" --argjson rules "$rules" '
     def spans: . as $t | [$rules[] as $r | $t | match($r.re; "g")
       | {rule: $r.rule, s: (.string | gsub("\\s+"; " ") | sub("^ "; "") | sub(" $"; ""))}];
     def bag: group_by([.rule, .s]) | map({key: (.[0].rule + "\t" + .[0].s), value: length}) | from_entries;
+    # An edit is applied to the current file, so a change to part of a
+    # suppression is judged on the whole of it. An edit whose old text is
+    # not in the file is judged on its own texts.
+    def apply($e): ($e.old_string // "") as $o | ($e.new_string // "") as $n
+      | (if $o == "" then [] else .text | split($o) end) as $p
+      | if ($p | length) < 2 then .old += [$o] | .new += [$n]
+        elif $e.replace_all then .text = ($p | join($n))
+        else .text = $p[0] + $n + ($p[1:] | join($o)) end;
     (if .tool_name == "Write" then {old: [$cur], new: [.tool_input.content // ""]}
-     elif .tool_name == "Edit" then {old: [.tool_input.old_string // ""], new: [.tool_input.new_string // ""]}
-     else {old: [.tool_input.edits[]? | .old_string // ""], new: [.tool_input.edits[]? | .new_string // ""]}
+     else (if .tool_name == "Edit" then [.tool_input] else [.tool_input.edits[]?] end) as $edits
+       | reduce $edits[] as $e ({text: $cur, old: [], new: []}; apply($e))
+       | {old: ([$cur] + .old), new: ([.text] + .new)}
      end) as $t
     | ([$t.old[] | spans[]] | bag) as $o
     | [$t.new[] | spans[]] | bag | to_entries[] | select(.value > ($o[.key] // 0)) | .key' 2>/dev/null) ||
@@ -359,7 +429,7 @@ judge_file() {
 # tables.
 judge_cargo() {
   local rel=$1 cur=$2 verdict
-  verdict=$(printf '%s' "$input" | jq -r --arg cur "$cur" '
+  verdict=$(printf '%s' "$input" | jq -r --rawfile cur "$cur" '
     # The lines that belong to a lints table or set a lints key, whitespace
     # removed, comments and blank lines dropped.
     def lintlines: split("\n") | reduce .[] as $l ({sec: false, out: []};
@@ -372,6 +442,15 @@ judge_cargo() {
     def section($old): ($cur | split($old)) as $parts
       | if ($parts | length) < 2 then null
         else ($parts[0] | split("\n") | map(select(test("^\\s*\\["))) | last // "") end;
+    # The file with the edits applied, or null when an old text is missing.
+    def applied($edits): reduce $edits[] as $e ($cur;
+      if . == null then null else
+        ($e.old_string // "") as $o | ($e.new_string // "") as $n
+        | (if $o == "" then [] else split($o) end) as $p
+        | if ($p | length) < 2 then null
+          elif $e.replace_all then $p | join($n)
+          else $p[0] + $n + ($p[1:] | join($o)) end
+      end);
     def edit_touches: (.old_string // "") as $o | (.new_string // "") as $n
       | if ($o + $n | test("lints")) then "lints"
         elif $o == "" then "no"
@@ -380,9 +459,12 @@ judge_cargo() {
         end;
     if .tool_name == "Write" then
       if ((.tool_input.content // "") | lintlines) == ($cur | lintlines) then "no" else "lints" end
-    elif .tool_name == "Edit" then .tool_input | edit_touches
-    else [.tool_input.edits[]? | edit_touches] as $v
-      | if any($v[]; . == "lints") then "lints" elif any($v[]; . == "unsure") then "unsure" else "no" end
+    else (if .tool_name == "Edit" then [.tool_input] else [.tool_input.edits[]?] end) as $edits
+      | [$edits[] | edit_touches] as $v
+      | applied($edits) as $after
+      | if any($v[]; . == "lints") then "lints"
+        elif $after != null and ($after | lintlines) != ($cur | lintlines) then "lints"
+        elif any($v[]; . == "unsure") then "unsure" else "no" end
     end' 2>/dev/null) || say "could not read the edit with jq, so this change to $rel was not checked for lints changes."
   case $verdict in
     lints) ask "this edit changes the [lints] or [workspace.lints] tables in $rel, which set what clippy and rustc deny. Changing them can weaken the checks, so a human approves this edit." ;;
@@ -396,49 +478,74 @@ judge_bash() {
   [[ -n $cmd ]] || exit 0
   root=$(repo_root "$cwd") || exit 0
   load_config "$root"
+  local rcwd
+  rcwd=$(phys_dir "$cwd") || say "could not resolve $cwd, so this command was not checked for changes to check config."
+  # $PWD and $(pwd) are the working directory the command starts in.
+  # shellcheck disable=SC2016 # the literal text is what's replaced.
+  cmd=${cmd//'$(pwd)'/$rcwd} cmd=${cmd//'${PWD}'/$rcwd} cmd=${cmd//'$PWD'/$rcwd}
 
-  local writers="(^|[;&|({[:space:]])((sed|perl)[[:space:]][^;&|]*-[a-zA-Z]*i|tee|mv|cp|rm|truncate|ln|install|patch|git[[:space:]]+(checkout|restore|rm|mv|apply))([[:space:]]|$)"
+  # install only where a command starts, so "pnpm install" isn't a write.
+  local bin="(/[^[:space:];&|]*/)?"
+  local writers="(^|[;&|({[:space:]])$bin((sed|perl)[[:space:]][^;&|]*-[a-zA-Z]*i[^[:space:]]*|tee|mv|cp|rm|truncate|ln|patch|dd|git([[:space:]]+(-[Cc][[:space:]]+[^[:space:]]+|--[a-z-]+=[^[:space:]]+|-[a-z]))*[[:space:]]+(checkout|restore|rm|mv|apply))([[:space:]]|$)"
+  local starts_install="(^|[;&|({])[[:space:]]*(sudo[[:space:]]+)?${bin}install[[:space:]]"
   local writes=""
   grep -Eq -- "$writers" <<<"$cmd" && writes=1
+  grep -Eq -- "$starts_install" <<<"$cmd" && writes=1
 
   # The words, quotes dropped, split on spaces and shell operators; and the
   # targets of > and >>.
   local -a words targets
   read -r -a words <<<"$(tr -d "\"'" <<<"$cmd" | tr ';&|()<>=\n\t' '         ')"
-  mapfile -t targets < <(tr -d "\"'" <<<"$cmd" | grep -oE '[0-9]?>>?[[:space:]]*[^[:space:];&|<>()]+' |
-    sed -E 's/^[0-9]?>>?[[:space:]]*//' | grep -v '^&')
+  mapfile -t targets < <(tr -d "\"'" <<<"$cmd" | grep -oE '[0-9]?>(>|\|)?[[:space:]]*[^[:space:];&|<>()]+' |
+    sed -E 's/^[0-9]?>(>|\|)?[[:space:]]*//' | grep -v '^&')
 
   # Each word (and target) as a path relative to the root, when it is one.
-  local w abs rel
+  local w abs rel dest
   local -A rels=() target_rels=() dirs=()
+  for w in "${targets[@]}"; do
+    abs=$(lexical_path "$w" "$rcwd")
+    [[ $abs == "$root"/* ]] || continue
+    target_rels[${abs#"$root"/}]=1
+    if [[ -L $abs ]] && dest=$(realpath -m -- "$abs" 2>/dev/null) && [[ $dest == "$root"/* ]]; then
+      target_rels[${dest#"$root"/}]=1
+    fi
+  done
   for w in "${words[@]}" "${targets[@]}"; do
     [[ -n $w && $w != -* && $w != *://* ]] || continue
-    abs=$(abs_path "$w" "$cwd" 2>/dev/null) || continue
-    abs=${abs%/.}
+    abs=$(lexical_path "$w" "$rcwd")
     [[ $abs == "$root"/* ]] || continue
     rel=${abs#"$root"/}
     rel=${rel%/}
     [[ -n $rel && $rel != .git && $rel != .git/* ]] || continue
     rels[$rel]=1
     [[ -d $abs ]] && dirs[$rel]=1
-  done
-  for w in "${targets[@]}"; do
-    abs=$(abs_path "$w" "$cwd" 2>/dev/null) || continue
-    [[ $abs == "$root"/* ]] && target_rels[${abs#"$root"/}]=1
+    # A symlink writes to its destination.
+    if [[ -L $abs ]] && dest=$(realpath -m -- "$abs" 2>/dev/null) && [[ $dest == "$root"/* ]]; then
+      rels[${dest#"$root"/}]=1
+    fi
   done
 
-  local named="" targeted="" m
+  local named="" targeted="" m hits=""
   if ((${#rels[@]} > 0)); then
+    hits=$(protected_matches "$root" "${!rels[@]}") || say "$git_failed"
     while IFS= read -r m; do
-      [[ -n $m ]] || continue
+      [[ -n $m && $named != *"$m"* ]] || continue
       named+="${named:+, }$m"
       [[ -n ${target_rels[$m]:-} ]] && targeted=1
-    done < <(protected_matches "$root" "${!rels[@]}")
+    done <<<"$hits"
+  fi
+  # git checkout/restore or rm of the whole tree, from its root.
+  if [[ -z $named ]] && grep -Eq -- "(^|[;&|({[:space:]])${bin}(rm[[:space:]]|git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+(checkout|restore)[[:space:]])" <<<"$cmd"; then
+    for w in "${words[@]}"; do
+      [[ $w != -* ]] || continue
+      [[ $(lexical_path "$w" "$rcwd") == "$root" ]] && { named="the whole repository"; break; }
+    done
   fi
   # A directory word names the protected files under it, tracked or not.
   if [[ -z $named && ${#dirs[@]} -gt 0 ]]; then
     local -a existing
     mapfile -t existing < <(git -C "$root" -c core.quotePath=false ls-files --cached --others --exclude-standard -- "${protected[@]}" 2>/dev/null)
+    for m in "${mandatory[@]}"; do [[ ! -e $root/$m ]] || existing+=("$m"); done
     local d f
     for d in "${!dirs[@]}"; do
       for f in "${existing[@]}"; do
@@ -460,7 +567,6 @@ judge_bash() {
     for rel in "${!rels[@]}"; do
       l=$(lang "$rel")
       [[ -n $l ]] || continue
-      [[ $l == gotest ]] && l=go
       ere=$ere_any
       [[ -z ${ere_by[$l]:-} ]] || ere="${ere_by[$l]}|$ere"
       if grep -Eq -- "$ere" <<<"$cmd"; then

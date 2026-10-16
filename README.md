@@ -178,15 +178,15 @@ Differences from the old scripts, all checked against 20 merged PRs of each (`te
 
 ## Claude Code hook
 
-The detector reports a weakened check once a pull request is open. By then an agent stuck on a finding may have silenced it and built on top. `agent/claude-protect-config.sh` is a `PreToolUse` hook that asks you first: before an agent changes check config or adds a suppression, Claude Code shows you the reason and waits for your approval. It reads the same lists and config as the detector, so it serves Rust, Go and TypeScript repositories alike. It needs bash 4.3, git and jq.
+The detector reports a weakened check once a pull request is open. By then an agent stuck on a finding may have silenced it and built on top. `agent/claude-protect-config.sh` is a `PreToolUse` hook that asks you first: before an agent changes check config or adds a suppression, Claude Code shows you the reason and waits for your approval. It reads the same lists and config as the detector, so it serves Rust, Go and TypeScript repositories alike. It needs bash 4.4, git and jq.
 
 It replaces rust-ci's `agent/claude-rust-protect-config.sh`. Register one of them, not both, or each change asks twice.
 
 What asks, with paths relative to the root of the git repository the file is in (of the working directory, for a Bash command):
 
-- **Check config.** A path in the `config-path` list, read from `.github/weakened-checks.conf` as committed on the default branch (the first of `origin/HEAD`, `origin/main`, `origin/master`, `main`, `master`), so an edit can't widen what it protects. Without a committed config, the built-in list. The config and the exceptions file always ask, also with `disable check-config`. A config that doesn't parse protects the built-in list plus every pathspec on its `config-path` lines, and the hook says it didn't parse. A config at another path (the action's `config` input) isn't seen.
+- **Check config.** A path in the `config-path` list, read from `.github/weakened-checks.conf` as committed on the default branch (the first of `origin/HEAD`, `origin/main`, `origin/master`, `main`, `master`), so an uncommitted edit to it can't narrow what it protects. Without a committed config, the built-in list. The config and the exceptions file always ask, by name, also with `disable check-config` or an `:(exclude)` pathspec. A config that doesn't parse protects the built-in list plus every pathspec on its `config-path` lines, and the hook says it didn't parse. A config at another path (the action's `config` input) isn't seen.
 - **`Cargo.toml`**, at any depth, only when the change touches a `[lints]` or `[workspace.lints]` table or a lints key, or when the edit's old text isn't in the file (the hook can't tell).
-- **A suppression added or widened** in a source file. Each match runs to the end of its attribute or comment, so `#[allow(dead_code)]` becoming `#[allow(dead_code, unused)]` asks, and keeping one unchanged doesn't. The rules are the detector's annotation rules, matched as text rather than on the syntax tree, so a suppression quoted in a string also asks:
+- **A suppression added or widened** in a source file. An Edit is applied to the file as it is, and each match runs to the end of its attribute or comment, so `#[allow(dead_code)]` becoming `#[allow(dead_code, unused)]` asks, whichever part of it the edit replaces, and keeping one unchanged doesn't. A symlink is judged by its own name and by the file it points to. The rules are the detector's annotation rules, matched as text rather than on the syntax tree, so a suppression quoted in a string also asks:
 
   | Files | Suppressions |
   |---|---|
@@ -198,11 +198,11 @@ What asks, with paths relative to the root of the git repository the file is in 
   | all of these, `.sh`, `.bash` | `nosemgrep` |
 
   A rule the config disables doesn't ask. `x as unknown as T` outside the test paths doesn't ask: it tells the agent that the detector will report it. Where the config prohibits `ts-as-unknown` and the exceptions file (read from `HEAD`) doesn't allow it, it asks.
-- **Bash, best effort.** A command that names a protected path, or a directory holding one, and writes with `sed -i`, `perl -i`, `tee`, `mv`, `cp`, `rm`, `truncate`, `ln`, `install`, `patch` or `git checkout`/`restore`/`rm`/`mv`/`apply`, or redirects into one; a `Cargo.toml` together with `lints`; a source file together with one of its suppressions. A write through any other program (a script, an editor) isn't seen.
+- **Bash, best effort.** A command that names a protected path, or a directory holding one, and writes with `sed -i`, `perl -i`, `tee`, `mv`, `cp`, `rm`, `truncate`, `ln`, `install`, `patch`, `dd` or `git checkout`/`restore`/`rm`/`mv`/`apply`, or redirects into one (`>`, `>>`, `>|`); paths are resolved against the working directory, so a `cd` earlier in the command, or a path held in a variable, isn't followed. `cp` from a protected file asks too. a `Cargo.toml` together with `lints`; a source file together with one of its suppressions. A write through any other program (a script, an editor) isn't seen.
 
 What CI reports and the hook doesn't: tagged bounds, removed tests, snapshots, workspace-lints inheritance, `unsafe` and `no_mangle`. A rule the config prohibits among those still fails in CI.
 
-Outcomes: `permissionDecision: "ask"` with the reason for a protected change; nothing otherwise, and nothing outside a git repository; `additionalContext` for an advisory note or when the check can't run (jq or git missing, input jq can't read, `lib/` missing, an older bash). It never blocks. `WEAKENED_CHECKS_PROTECT_CONFIG=off` turns it off: in the environment Claude Code starts in, for every project, or under `env` in a project's `.claude/settings.local.json`, for that project.
+Outcomes: `permissionDecision: "ask"` with the reason for a protected change; nothing otherwise, and nothing outside a git repository; `additionalContext` for an advisory note or when the check can't run (jq or git missing or failing, input jq can't read, `lib/` missing, an older bash). It never blocks. `WEAKENED_CHECKS_PROTECT_CONFIG=off` turns it off: in the environment Claude Code starts in, for every project, or under `env` in a project's `.claude/settings.local.json`, for that project.
 
 Install once per machine, from a clone of this repository (the hook finds `lib/` through its symlink, so keep the clone):
 
