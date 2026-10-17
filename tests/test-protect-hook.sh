@@ -679,6 +679,62 @@ commit_conf 'config-path @defaults :(exclude).claude/** :(exclude)**/.claude/**'
 write "an :(exclude) in the config doesn't unprotect .claude/hooks" .claude/hooks/check.sh 'x' ask ".claude/hooks/check.sh is Claude Code's project settings"
 bash_cmd "an :(exclude) in the config doesn't unprotect .claude/hooks for rm" "rm -rf .claude/hooks" ask
 
+# ---------------------------------------------------------------------------
+# New: ways around the #5 and #6 checks that the first version let through.
+# ---------------------------------------------------------------------------
+
+new_repo
+write "Write to a nested .cargo/mutants.toml asks (the hook's own list)" crates/lib/.cargo/mutants.toml 'x = 1' ask "crates/lib/.cargo/mutants.toml is check config"
+write "Write to .lefthook-local.yaml asks (the hook's own list)" .lefthook-local.yaml 'x = 1' ask ".lefthook-local.yaml is check config"
+printf '[package]\nname = "lib"\n\n[profile.release]\noverflow-checks = true # check\n\n[lints.clippy]\nunwrap_used = "deny"\n' >"${r}/crates/lib/Cargo.toml"
+edit "quoting a lints header into one key asks" crates/lib/Cargo.toml '[lints.clippy]' '["lints.clippy"]' ask "[lints]"
+edit "quoting a profile header into one key asks" crates/lib/Cargo.toml '[profile.release]' '["profile.release"]' ask
+edit "quoting a header's segments separately does not ask" crates/lib/Cargo.toml '[lints.clippy]' '["lints"."clippy"]' silent
+edit "a profile header spelled with an escape asks" crates/lib/Cargo.toml 'name = "lib"' 'name = "lib"
+["profile".dev]
+overflow-checks = false' ask
+edit "changing only a comment beside a profile value does not ask" crates/lib/Cargo.toml '# check' '# keep check' silent
+write "wrapping the lints table in a multi-line string asks" crates/lib/Cargo.toml '[package]
+name = "lib"
+description = """
+
+[lints.clippy]
+unwrap_used = "deny"
+#"""
+[profile.release]
+overflow-checks = true # check
+' ask
+printf '[workspace.lints.rust]\nunexpected_cfgs = { level = "deny", check-cfg = [\n  '"'"'cfg(mode, values("a b"))'"'"',\n] }\n\n[profile.dev]\nrustflags = [\n  "-C", "debug-assertions=no",\n  "-C", "debug-assertions=yes",\n]\n' >"${r}/Cargo.toml"
+edit "a space inside a string in a lints value asks" Cargo.toml 'values("a b")' 'values("ab")' ask
+multi "reordering the lines of a profile array asks" Cargo.toml \
+  '[{"old_string": "  \"-C\", \"debug-assertions=no\",\n  \"-C\", \"debug-assertions=yes\",", "new_string": "  \"-C\", \"debug-assertions=yes\",\n  \"-C\", \"debug-assertions=no\","}]' ask
+
+printf '#![deny(unsafe_code)]\n#![deny(dead_code, reason = "one, two")]\n#[warn(missing_docs)]\npub fn a() {}\n#[test]\n#[should_panic(expected = "[foo] not found")]\nfn t() {}\n' >"${r}/crates/lib/src/m.rs"
+edit "commenting out a #![deny] asks" crates/lib/src/m.rs '#![deny(unsafe_code)]' '// #![deny(unsafe_code)]' ask "#![deny(unsafe_code)]"
+edit "a #![deny] put in a block comment asks" crates/lib/src/m.rs '#![deny(unsafe_code)]' '/* #![deny(unsafe_code)] */' ask
+edit "a #![deny] put in a string asks" crates/lib/src/m.rs '#![deny(unsafe_code)]' 'const _S: &str = "#![deny(unsafe_code)]";' ask
+edit "deny to forbid does not ask" crates/lib/src/m.rs '#![deny(unsafe_code)]' '#![forbid(unsafe_code)]' silent
+edit "warn to deny does not ask" crates/lib/src/m.rs '#[warn(missing_docs)]' '#[deny(missing_docs)]' silent
+edit "deny to warn asks" crates/lib/src/m.rs '#![deny(unsafe_code)]' '#![warn(unsafe_code)]' ask "#![deny(unsafe_code)]"
+edit "changing a reason with commas in it does not ask" crates/lib/src/m.rs 'one, two' 'one, three' silent
+edit "a lint named only in a reason is still removed" crates/lib/src/m.rs '#![deny(unsafe_code)]' '#![deny(missing_docs, reason = ",unsafe_code,")]' ask
+edit "narrowing a should_panic with a ] in its string asks" crates/lib/src/m.rs '"[foo] not found"' '"[foo]"' ask "should_panic"
+
+for i in $(seq 1001); do printf '#[deny(dead_code)]\nfn f%d() {}\n' "${i}"; done >"${r}/crates/lib/src/many.rs"
+edit "a file with over 1000 lint attributes says it wasn't checked for removed ones" crates/lib/src/many.rs 'fn f10()' 'fn g10()' context "over 1000 lint attributes"
+printf 'key = abc # gitleaks:alow\n' >"${r}/app.ini"
+edit "an edit completing a gitleaks:allow without the word gitleaks asks" app.ini 'alow' 'allow' ask "gitleaks:allow"
+
+new_repo
+mkdir -p "${r}/tools/cc" "${r}/empty/.claude"
+ln -s tools/cc "${r}/.claude"
+write "a Write through a symlinked .claude asks" .claude/settings.local.json '{"env": {}}' ask "is Claude Code's project settings"
+edit "an Edit through a symlinked .claude asks" .claude/hooks/x.sh 'a' 'b' ask "is Claude Code's project settings"
+rm -f "${r}/.claude"
+bash_cmd "symlinking a directory in as .claude asks" "mkdir -p tools/cc && ln -s tools/cc .claude" ask ".claude"
+bash_cmd "copying settings into an empty .claude asks" "cp /tmp/settings.json empty/.claude/" ask "empty/.claude"
+bash_cmd "moving settings into an empty .claude asks" "mv /tmp/settings.json empty/.claude" ask
+
 mkdir -p "${work}/tmpdir"
 TMPDIR="${work}/tmpdir" write "a protected Write (for the scratch check)" deny.toml 'x' ask
 TMPDIR="${work}/tmpdir" bash_cmd "a Bash command (for the scratch check)" "ls" silent

@@ -32,8 +32,9 @@
 #     @ts-expect-error without a reason, eslint-disable, biome-ignore, JS
 #     test skip/only; svelte-ignore; Python skips; nosemgrep. Beyond them:
 #     Rust should_panic and cfg(miri), a removed or narrowed Rust deny,
-#     forbid or warn, and gitleaks:allow in any file. Rust attributes are
-#     compared without their whitespace. A rule the config disables doesn't
+#     forbid or warn (not a raised level; a commented-out one counts), and
+#     gitleaks:allow in any file. Rust attributes are compared without their
+#     whitespace. A rule the config disables doesn't
 #     ask (should_panic goes with rust-ignore, removed lint attributes with
 #     rust-allow; gitleaks:allow can't be disabled). "x as unknown as T"
 #     outside the test paths only adds context, unless the config prohibits
@@ -120,7 +121,7 @@ source "$lib" || say "could not load $lib, so this change was not checked for we
 hook_config_paths=(
   docs/CODEOWNERS .lefthook.yaml lefthook-local.yml lefthook-local.yaml .lefthook-local.yml .lefthook-local.yaml
   .github/zizmor.yml .github/zizmor.yaml .github/actionlint.yml .github/actionlint.yaml
-  ':(glob)**/.gitattributes' ':(glob)**/build.rs'
+  ':(glob)**/.gitattributes' ':(glob)**/build.rs' ':(glob)**/.cargo/mutants.toml'
 )
 default_config_paths+=("${hook_config_paths[@]}")
 cfg_error=""
@@ -222,11 +223,12 @@ load_config() {
 
 # claude_settings <relative path>: whether it is Claude Code's project
 # settings or hooks, at any depth (Claude Code reads them from the directory
-# it starts in, which needn't be the repository root). Their env can turn this
-# hook off, so they always ask, like the config.
+# it starts in, which needn't be the repository root), or a .claude directory
+# itself (a symlink or copy put in its place). Their env can turn this hook
+# off, so they always ask, like the config.
 claude_settings() {
   case /$1 in
-    */.claude/settings.json | */.claude/settings.local.json | */.claude/hooks | */.claude/hooks/*) return 0 ;;
+    */.claude | */.claude/settings.json | */.claude/settings.local.json | */.claude/hooks | */.claude/hooks/*) return 0 ;;
   esac
   return 1
 }
@@ -290,9 +292,9 @@ lang() {
 # line ends are written (?=\n|$) and spaces [ \t].
 cmt='(?:(?!\*/)[^\n])*'
 declare -A rules_by ere_by
-rules_by[rust]="rust-allow	#\\s*!?\\s*\\[\\s*(?:allow|expect)\\s*\\([^\\]]*\\]?
+rules_by[rust]="rust-allow	#\\s*!?\\s*\\[\\s*(?:allow|expect)\\s*\\((?:[^\\]\"]|\"(?:[^\"\\\\]|\\\\.)*\")*\\]?
 rust-allow	#\\s*!?\\s*\\[\\s*cfg_attr\\s*\\([^\\]]*\\b(?:allow|expect)\\s*\\([^\\]]*\\]?
-rust-ignore	#\\s*!?\\s*\\[\\s*(?:cfg_attr\\s*\\([^\\]]*\\b)?(?:ignore|should_panic)\\b[^\\]]*\\]?
+rust-ignore	#\\s*!?\\s*\\[\\s*(?:cfg_attr\\s*\\([^\\]]*\\b)?(?:ignore|should_panic)\\b(?:[^\\]\"]|\"(?:[^\"\\\\]|\\\\.)*\")*\\]?
 rust-cfg	#\\s*!?\\s*\\[\\s*cfg\\s*\\(\\s*(?:any\\s*\\(\\s*\\)|not\\s*\\(\\s*all\\s*\\(\\s*\\)\\s*\\)|false|miri)\\s*\\)[^\\]]*\\]?
 rust-rustfmt-skip	#\\s*!?\\s*\\[[^\\]]*\\b(?:rustfmt\\s*::\\s*skip|rustfmt_skip)\\b[^\\]]*\\]?"
 rules_by[go]="go-nolint	//[ \\t]?nolint\\b$cmt"
@@ -313,9 +315,10 @@ py-test-skip	\\b(?:pytest\\.skip|self\\.skipTest)[ \\t]*\\("
 rules_nosemgrep="nosemgrep	\\bnosemgrep\\b$cmt"
 # In any file. No detector rule, so the config can't turn it off.
 rules_any="gitleaks-allow	gitleaks:allow"
-# A Rust attribute, whole (a "]" in a string literal doesn't end it), and the
-# ones that make lints stricter, whose removal asks.
-rust_attr_re='#\s*!?\s*\[(?:[^\]"]|"(?:[^"\\]|\\.)*")*\]'
+# A Rust deny, forbid, warn or cfg_attr attribute, whole (a "]" in a string
+# literal doesn't end it), and the ones that make lints stricter, whose
+# removal asks.
+rust_lvl_attr_re='#\s*!?\s*\[\s*(?:deny|forbid|warn|cfg_attr)\b(?:[^\]"]|"(?:[^"\\]|\\.)*")*\]'
 rust_strict_re='^#!?\[(deny|forbid|warn)\(|^#!?\[cfg_attr\(.*\b(deny|forbid|warn)\('
 
 # rules_for <lang>: its rules as a JSON array of {rule, re}, less disabled
@@ -401,9 +404,12 @@ judge_file() {
   rel=${abs#"$root"/}
   load_config "$root"
 
-  # A symlink is judged by its own name and by the file it writes to.
+  # A symlink is judged by its own name and by the file it writes to, and a
+  # path through a symlinked directory by its name as given too.
   local -a names=("$rel")
-  local dest
+  local dest lex
+  lex=$(lexical_path "$file" "$(phys_dir "$cwd" || printf '%s' "$cwd")")
+  [[ $lex == "$root"/* && $lex != "$abs" ]] && names+=("${lex#"$root"/}")
   if [[ -L $abs ]] && dest=$(realpath -m -- "$abs" 2>/dev/null) && [[ $dest == "$root"/* ]]; then
     names+=("${dest#"$root"/}")
   fi
@@ -429,11 +435,23 @@ judge_file() {
 
   local l
   l=$(lang "$rel")
-  # Any other file is only read for an added gitleaks:allow.
-  [[ -n $l || $input == *gitleaks* ]] || done_quiet
+  # Any other file is only read for an added gitleaks:allow, when the edit or
+  # the file mentions gitleaks (an edit can complete the marker).
+  [[ -n $l || $input == *gitleaks* ]] || grep -q gitleaks "$cur" || done_quiet
   local rules strict=false
   rules=$(rules_for "$l") || say "could not build the suppression rules with jq, so this change to $rel was not checked."
-  [[ $l == rust ]] && on rust-allow && strict=true
+  # Removed lint attributes, only when there can be one: a match pass over a
+  # large attribute-dense file is slow.
+  local lvl_re='(deny|forbid|warn)[[:space:]]*\('
+  if [[ $l == rust ]] && on rust-allow && { grep -Eq "$lvl_re" "$cur" || grep -Eq "$lvl_re" <<<"$input"; }; then
+    strict=true
+    # jq's cost grows with the square of the matches; past this many the
+    # hook would outlive its timeout, so it says so instead.
+    if (($(grep -Ec "$lvl_re" "$cur") > 1000)); then
+      strict=false
+      cfg_note+="${cfg_note:+ }($rel has over 1000 lint attributes, so this edit was not checked for removed ones.)"
+    fi
+  fi
   # The suppressions the new text holds more often than the old, as
   # "rule<TAB>text" lines, and with strict, the Rust deny, forbid and warn
   # lints the old text holds more often than the new, as "-strict<TAB>text".
@@ -441,22 +459,38 @@ judge_file() {
   # one is no change; the text shown is the first as written.
   local found
   found=$(printf '%s' "$input" | jq -r --rawfile cur "$cur" --argjson rules "$rules" --arg lang "$l" \
-    --argjson strict "$strict" --arg attr "$rust_attr_re" --arg strict_re "$rust_strict_re" '
+    --argjson strict "$strict" --arg lvl_attr "$rust_lvl_attr_re" --arg strict_re "$rust_strict_re" '
     def shown: gsub("\\s+"; " ") | sub("^ "; "") | sub(" $"; "");
     def key: if $lang == "rust" then gsub("\\s+"; "") else shown end;
     def spans: . as $t | [$rules[] as $r | $t | match($r.re; "g") | .string
       | {rule: $r.rule, k: key, s: shown}];
+    # The deny, forbid, warn and cfg_attr attributes outside comments and
+    # strings, so one commented out or quoted is gone. Only these are
+    # matched (each match costs jq a pass over the text before it), and
+    # where each one sits is read from the text before it: inside a block
+    # comment, or after a // or an open quote on its line. The strings inside
+    # an attribute are emptied.
+    def attrs: . as $t | [match($lvl_attr; "g") | .offset as $at | .string
+      | ($t[0:$at]) as $pre | ($pre | rindex("/*")) as $open | ($pre | rindex("*/")) as $close
+      | ($pre[(($pre | rindex("\n")) // -1) + 1:] | gsub("\\\\."; "")) as $line
+      | select(($open == null or ($close != null and $close > $open))
+          and ($line | test("//") | not) and ([$line | match("\""; "g")] | length % 2 == 0))
+      | gsub("\"(?:[^\"\\\\]|\\\\.)*\""; "\"\"")];
+    def rank: {warn: 1, deny: 2, forbid: 3}[.];
     # Each deny, forbid or warn as one (level, lint) pair, so adding a lint to
     # the list is no removal; a cfg_attr applying one stays whole.
-    def stricts: [match($attr; "g") | .string | gsub("\\s+"; "") | select(test($strict_re))
+    def stricts: [attrs[] | gsub("\\s+"; "") | select(test($strict_re))
       | (capture("^#(?<b>!?)\\[(?<lvl>deny|forbid|warn)\\((?<l>.*)\\)\\]$") // null) as $c
       | if $c == null then {rule: "-strict", k: ., s: .}
         else $c.l | split(",")[] | select(. != "" and (test("^reason=") | not))
-          | ("#" + $c.b + "[" + $c.lvl + "(" + . + ")]") as $p | {rule: "-strict", k: $p, s: $p}
+          | ("#" + $c.b + "[" + $c.lvl + "(" + . + ")]") as $p
+          | {rule: "-strict", k: $p, s: $p, lint: ($c.b + .), lvl: ($c.lvl | rank)}
         end];
-    def bag: group_by([.rule, .k]) | map({key: (.[0].rule + "\t" + .[0].k), value: {n: length, s: .[0].s}}) | from_entries;
-    def more($a; $b): ($b | bag) as $o | $a | bag | to_entries[]
-      | select(.value.n > ($o[.key].n // 0)) | (.key | split("\t")[0]) + "\t" + .value.s;
+    # The strictest level each lint has, so raising one (warn to deny, deny to
+    # forbid) is no removal.
+    def best: map(select(.lint != null)) | group_by(.lint) | map({key: .[0].lint, value: (map(.lvl) | max)}) | from_entries;
+    def bag: group_by([.rule, .k]) | map({key: (.[0].rule + "\t" + .[0].k), value: (.[0] + {n: length})}) | from_entries;
+    def more($a; $b): ($b | bag) as $o | $a | bag | to_entries[] | select(.value.n > ($o[.key].n // 0)) | .value;
     # An edit is applied to the current file, so a change to part of a
     # suppression is judged on the whole of it. An edit whose old text is
     # not in the file is judged on its own texts.
@@ -470,8 +504,10 @@ judge_file() {
        | reduce $edits[] as $e ({text: $cur, old: [], new: []}; apply($e))
        | {old: ([$cur] + .old), new: ([.text] + .new)}
      end) as $t
-    | more([$t.new[] | spans[]]; [$t.old[] | spans[]]),
-      (if $strict then more([$t.old[] | stricts[]]; [$t.new[] | stricts[]]) else empty end)' 2>/dev/null) ||
+    | (more([$t.new[] | spans[]]; [$t.old[] | spans[]]) | .rule + "\t" + .s),
+      (if $strict then [$t.new[] | stricts[]] as $n | ($n | best) as $best
+         | more([$t.old[] | stricts[]]; $n) | select(.lint == null or ($best[.lint] // 0) < .lvl) | .rule + "\t" + .s
+       else empty end)' 2>/dev/null) ||
     say "could not read the edit with jq, so this change to $rel was not checked for added suppressions."
   [[ -n $found ]] || done_quiet
 
@@ -514,26 +550,40 @@ judge_file() {
 judge_cargo() {
   local rel=$1 cur=$2 verdict
   verdict=$(printf '%s' "$input" | jq -r --rawfile cur "$cur" --arg q "'" '
-    def keyof: gsub("\\s+"; "") | gsub("[\"" + $q + "]"; "");
-    def seg: "(?:\"[^\"]*\"|" + $q + "[^" + $q + "]*" + $q + "|[A-Za-z0-9_-]+)";
-    # Each value line as "<full dotted path>=<value>", whitespace removed, so
-    # the table context counts and the spelling does not: a key under
-    # [workspace.lints.clippy] and the dotted clippy.<key> under
-    # [workspace.lints] are the same. A line that is neither a header nor a
-    # key (a multi-line array) belongs to the key above it. Kept: the lines
-    # under lints, workspace.lints or profile, and any that mention lints.
-    def records: split("\n") | reduce .[] as $l ({tbl: "", last: null, out: []};
-      if ($l | test("^\\s*(#.*)?$")) then .
+    def seg: "(?:\"(?:[^\"\\\\]|\\\\.)*\"|" + $q + "[^" + $q + "]*" + $q + "|[A-Za-z0-9_-]+)";
+    # A key as its dotted segments, spaces removed and a quoted segment
+    # unquoted, unless it holds a dot or an escape: ["lints.clippy"] is one
+    # key, not the lints.clippy table.
+    def keyof: [match(seg; "g") | .string
+      | if test("^[\"" + $q + "]") and (.[1:-1] | test("[.\\\\]") | not) then .[1:-1] else . end] | join(".");
+    # A value with the spaces and the comment outside its strings removed.
+    def vnorm: gsub("(?<s>\"(?:[^\"\\\\]|\\\\.)*\"|" + $q + "[^" + $q + "]*" + $q + ")|\\s+|#.*$";
+      if .s != null then .s else "" end);
+    def odd($d): [match($d; "g")] | length % 2 == 1;
+    # Each key as "<full dotted path>=<value>", so the table context counts
+    # and the spelling does not: a key under [workspace.lints.clippy] and the
+    # dotted clippy.<key> under [workspace.lints] are the same. A line that is
+    # neither a header nor a key (a multi-line array) is added, in order, to
+    # the key above it, as is every line of a multi-line string. Kept: the
+    # keys under lints, workspace.lints or profile, any that mention lints,
+    # and any whose key holds an escape (it could spell one of those).
+    def records: split("\n") | reduce .[] as $l ({tbl: "", last: false, ml: null, out: []};
+      if .ml != null then
+        .ml as $d | .out[(.out | length) - 1] += "+" + $l | if ($l | odd($d)) then .ml = null else . end
+      elif ($l | test("^\\s*(#.*)?$")) then .
       elif ($l | test("^\\s*\\[\\[?\\s*" + seg + "(\\s*\\.\\s*" + seg + ")*\\s*\\]\\]?\\s*(#.*)?$")) then
-        .tbl = ($l | capture("^\\s*\\[\\[?(?<k>[^\\]]*)\\]").k | keyof) | .last = null
+        .tbl = ($l | capture("^\\s*\\[\\[?(?<k>[^\\]]*)\\]").k | keyof) | .last = false
       else ([$l | capture("^\\s*(?<k>" + seg + "(\\s*\\.\\s*" + seg + ")*)\\s*=(?<v>.*)$")] | .[0]) as $m
         | if $m != null then
             ((if .tbl == "" then "" else .tbl + "." end) + ($m.k | keyof)) as $p
-            | .last = $p | .out += [$p + "=" + ($m.v | gsub("\\s+"; ""))]
-          else .out += [(.last // .tbl) + "+" + ($l | gsub("\\s+"; ""))]
+            | .last = true | .out += [$p + "=" + ($m.v | vnorm)]
+            | if ($m.v | odd("\"\"\"")) then .ml = "\"\"\""
+              elif ($m.v | odd($q + $q + $q)) then .ml = ($q + $q + $q) else . end
+          elif .last then .out[(.out | length) - 1] += "+" + ($l | vnorm)
+          else .out += [.tbl + "+" + ($l | vnorm)]
           end
       end) | .out
-      | map(select(test("^((workspace\\.)?lints|profile)([.=+]|$)") or test("lints"))) | sort;
+      | map(select(test("^((workspace\\.)?lints|profile)([.=+]|$)") or test("lints") or test("^[^=+]*\\\\"))) | sort;
     # The file with the edits applied, or null when an old text is missing.
     def applied($edits): reduce $edits[] as $e ($cur;
       if . == null then null else
