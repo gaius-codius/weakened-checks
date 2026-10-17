@@ -42,11 +42,12 @@
 #     allow it. An Edit is applied to the file before the comparison, and a
 #     symlink is judged by its own name and its destination.
 #   - Bash, best effort: the command is parsed (quotes, heredocs, $(...),
-#     bash -c, eval, wrappers such as sudo and env), and only the files it
-#     writes are judged: redirect targets, and what sed -i, perl -i, tee,
-#     sponge, mv, cp, ln, install, rm, truncate, patch, dd, find -delete or
-#     -exec, xargs and git checkout/restore/rm/mv/apply are given (against
-#     cwd and any directory a cd or git -C names). It asks for a protected
+#     functions, bash -c, eval, wrappers such as sudo and env, runners such
+#     as uv run), and only the files it writes are judged: redirect targets,
+#     and what sed -i, perl -i, tee, sponge, mv, cp, ln, install, rm,
+#     truncate, patch, dd, find -delete or -exec, xargs and git
+#     checkout/restore/rm/mv/apply are given (against cwd and any directory a
+#     cd, env -C, sudo -D or git -C names). It asks for a protected
 #     path written (or a directory holding one, removed or checked out); any
 #     write to a Cargo.toml; a source file written by a command whose text
 #     holds a suppression, or a .rs file by one saying deny or forbid;
@@ -161,7 +162,12 @@ abs_path() {
 
 # lexical_path <path> <resolved cwd>: <path> made absolute, with . and ..
 # resolved as text and no process started: a long command has many words.
+# lex sets lx instead of printing, for callers that would otherwise fork.
 lexical_path() {
+  lex "$@"
+  printf '%s\n' "$lx"
+}
+lex() {
   local p=$1 part
   [[ $p == /* ]] || p="$2/$p"
   local -a parts kept=()
@@ -174,7 +180,7 @@ lexical_path() {
     esac
   done
   local IFS=/
-  printf '/%s\n' "${kept[*]}"
+  lx="/${kept[*]}"
 }
 
 # repo_root <dir>: the git repository's root of <dir>, or of its nearest
@@ -272,12 +278,24 @@ protected_matches() {
     [[ $p == .git || $p == .git/* || /$p/ == */../* || /$p/ == */./* ]] || valid+=("$p")
   done
   ((${#valid[@]} > 0)) || return 0
+  # An index can't hold a path and one under it (one replaces the other), so
+  # the paths go in by depth, one index per depth.
+  local -A by_depth=()
+  local d
+  for p in "${valid[@]}"; do
+    d=${p//[^\/]/}
+    by_depth[${#d}]+=$p$'\x1f'
+  done
   idx=$scratch/index.$BASHPID
-  printf '100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\t%s\0' "${valid[@]}" |
-    GIT_INDEX_FILE=$idx git -C "$root" update-index --add -z --index-info 2>/dev/null &&
-    GIT_INDEX_FILE=$idx git -C "$root" -c core.quotePath=false ls-files -- "${protected[@]}" 2>/dev/null ||
-    ok=1
-  rm -f "$idx"
+  local -a batch
+  for d in "${by_depth[@]}"; do
+    mapfile -d $'\x1f' -t batch < <(printf '%s' "$d")
+    printf '100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\t%s\0' "${batch[@]}" |
+      GIT_INDEX_FILE=$idx git -C "$root" update-index --add -z --index-info 2>/dev/null &&
+      GIT_INDEX_FILE=$idx git -C "$root" -c core.quotePath=false ls-files -- "${protected[@]}" 2>/dev/null ||
+      ok=1
+    rm -f "$idx"
+  done
   return "$ok"
 }
 git_failed="git could not match paths against the check-config list, so this change was not checked for weakened checks."
@@ -741,8 +759,10 @@ judge_bash_words() {
 # The shell parser, in POSIX awk. It reads a command on stdin and prints one
 # record per line, fields split by tabs, with \, tab and newline escaped:
 #   C <id> <pipeline>       a simple command starts
-#   W <id> <L|X> <word>     one of its words, quotes removed (X: it holds a $
-#                           or backtick expansion, kept as written)
+#   W <id> <flags> <words>  its words, quotes removed, each ended by \x1f, and
+#                           a flag for each, also ended by \x1f (X: the word
+#                           holds a $ or backtick expansion, kept as written;
+#                           L: it doesn't); printed at the end
 #   R <id> <L|X> <word>     a file a redirect writes (>, >>, >|, &>, >& file, <>)
 #   H <id> <quoted> <body>  a heredoc the command reads
 #   I <id> <word>           a here-string the command reads
@@ -751,23 +771,48 @@ judge_bash_words() {
 # whose delimiter isn't quoted are parsed as commands of their own.
 read -r -d '' shell_awk <<'AWK'
 BEGIN {
-  S = ""
-  while ((getline line) > 0) S = S line "\n"
+  n = 0
+  while ((getline line) > 0) L[++n] = line "\n"
+  S = join(n)
   N = length(S); P = 1; CUR = 0; PIPE = 1; NC = 0; NH = 0; HB = 0; ERR = 0
   parse_list("")
+  for (c = 1; c <= NC; c++) {
+    if (!WN[c]) continue
+    for (i = 1; i <= WN[c]; i++) L[i] = WF[c, i] "\037"
+    f = join(WN[c])
+    for (i = 1; i <= WN[c]; i++) L[i] = WW[c, i] "\037"
+    print "W\t" c "\t" f "\t" join(WN[c])
+  }
   if (ERR) print "E"
   exit
 }
 function ch(i) { return substr(S, i, 1) }
-# enc(s): s with \, tab and newline escaped, so a record is one line.
-function enc(s,   out, m, c) {
-  out = ""
-  while ((m = match(s, /[\\\t\n]/)) > 0) {
-    c = substr(s, m, 1)
-    out = out substr(s, 1, m - 1) (c == "\\" ? "\\\\" : c == "\t" ? "\\t" : "\\n")
-    s = substr(s, m + 1)
+# join(n): L[1..n] as one string, joined in pairs, so a long command isn't
+# copied once per line.
+function join(n,   i, m) {
+  if (n == 0) return ""
+  while (n > 1) {
+    m = 0
+    for (i = 1; i <= n; i += 2) L[++m] = (i < n) ? L[i] L[i + 1] : L[i]
+    n = m
   }
-  return out s
+  return L[1]
+}
+# enc(s): s with \, tab and newline escaped, so a record is one line. It
+# works through s a window at a time, so a long heredoc isn't copied for
+# every line.
+function enc(s,   i, n, w, out, m, c) {
+  n = 0
+  for (i = 1; i <= length(s); i += 1024) {
+    w = substr(s, i, 1024); out = ""
+    while ((m = match(w, /[\\\t\n]/)) > 0) {
+      c = substr(w, m, 1)
+      out = out substr(w, 1, m - 1) (c == "\\" ? "\\\\" : c == "\t" ? "\\t" : "\\n")
+      w = substr(w, m + 1)
+    }
+    L[++n] = out w
+  }
+  return join(n)
 }
 # next_at(re): the offset from P (1 is P itself) of the next character
 # matching re, or 0. It reads a window at a time, so a long command isn't
@@ -778,19 +823,23 @@ function next_at(re,   off, m) {
   return 0
 }
 function new_cmd() { NC++; CUR = NC; print "C\t" NC "\t" PIPE }
-# parse_list(term): commands up to term (")") or the end. A ")" with no "("
-# (a case pattern) ends a command.
-function parse_list(term,   c, d) {
+# parse_list(term): commands up to term (")") or the end. A ")" after a
+# case pattern ends a command, as does one with no "(". Inside [[ ... ]],
+# < > ( ) are part of the test.
+function parse_list(term,   c, d, incase, intest) {
   while (P <= N && !ERR) {
     c = ch(P)
     if (c == " " || c == "\t") { P++; continue }
+    if (c == "\\" && ch(P + 1) == "\n") { P += 2; continue }
     if (c == "\n") { P++; CUR = 0; PIPE++; if (NH > HB) read_heredocs(); continue }
     if (c == "#") { d = next_at("\n"); P = d ? P + d - 1 : N + 1; continue }
-    if (c == ")") { if (term == ")") return 1; P++; CUR = 0; PIPE++; continue }
+    if (intest && index("<>()", c)) { P++; continue }
+    if (c == ")") { if (term == ")" && !incase) return 1; P++; CUR = 0; PIPE++; continue }
     if (c == "(") {
-      if (CUR == 0 && ch(P + 1) == "(") { skip_parens(); continue }
+      if ((CUR == 0 || KWONLY) && ch(P + 1) == "(") { skip_parens(); continue }
       P++
-      if (CUR == 0) {
+      if (CUR == 0 || KWONLY) {
+        CUR = 0
         parse_list(")")
         if (P > N) { ERR = 1; return 0 }
         P++; CUR = 0
@@ -813,15 +862,23 @@ function parse_list(term,   c, d) {
     read_word()
     # A file descriptor number before a redirect isn't a word.
     if (!RWQ && !RWX && RW ~ /^[0-9]+$/ && (ch(P) == "<" || ch(P) == ">")) continue
-    if (CUR == 0) new_cmd()
-    print "W\t" CUR "\t" (RWX ? "X" : "L") "\t" enc(RW)
+    KWONLY = (CUR == 0 || KWONLY) && !RWQ && RW ~ /^(if|then|elif|else|do|while|until|!|time)$/
+    if (CUR == 0) {
+      new_cmd()
+      if (!RWQ && RW == "case") incase++
+      if (!RWQ && RW == "esac" && incase) incase--
+      if (!RWQ && RW == "[[") intest = 1
+    }
+    if (!RWQ && RW == "]]") intest = 0
+    WN[CUR]++; WW[CUR, WN[CUR]] = enc(RW); WF[CUR, WN[CUR]] = RWX ? "X" : "L"
   }
   return 0
 }
 # read_word: one word into RW; RWX says it holds an expansion, RWQ that some
-# of it was quoted or escaped.
-function read_word(   w, wx, wq, c, d) {
-  w = ""; wx = 0; wq = 0
+# of it was quoted or escaped, RWA that it has a $'...' escape (kept as
+# written).
+function read_word(   w, wx, wq, wa, c, d) {
+  w = ""; wx = 0; wq = 0; wa = 0
   while (P <= N && !ERR) {
     c = ch(P)
     if (index(" \t\n;&|()<>", c)) break
@@ -837,7 +894,7 @@ function read_word(   w, wx, wq, c, d) {
       d = ch(P + 1)
       if (d == "'") {
         P += 2; wq = 1
-        while (P <= N && ch(P) != "'") { if (ch(P) == "\\") { w = w substr(S, P, 2); P += 2 } else { w = w ch(P); P++ } }
+        while (P <= N && ch(P) != "'") { if (ch(P) == "\\") { w = w substr(S, P, 2); P += 2; wa = 1 } else { w = w ch(P); P++ } }
         if (P > N) { ERR = 1; break }
         P++
         continue
@@ -849,7 +906,7 @@ function read_word(   w, wx, wq, c, d) {
     if (c == "`") { w = w backtick(); wx = 1; continue }
     w = w c; P++
   }
-  RW = w; RWX = wx; RWQ = wq
+  RW = w; RWX = wx; RWQ = wq; RWA = wa
 }
 # scan_dq(eos): the inside of double quotes (with eos, a heredoc body to the
 # end). DQX says it holds an expansion.
@@ -900,25 +957,36 @@ function backtick(   st, inner) {
   sub_parse(inner, 0)
   return substr(S, st, P - st)
 }
-# skip_parens: past the arithmetic (( ... )) at P.
+# skip_parens: past the arithmetic (( ... )) at P, parsing the command
+# substitutions in it.
 function skip_parens(   n, c) {
   n = 0
-  while (P <= N) {
-    c = ch(P); P++
+  while (P <= N && !ERR) {
+    c = ch(P)
+    if (c == "$" && ch(P + 1) == "(" && ch(P + 2) != "(") { dollar(); continue }
+    if (c == "`") { backtick(); continue }
+    P++
     if (c == "(") n++
     else if (c == ")" && --n == 0) return
   }
   ERR = 1
 }
-# skip_brace: past a ${...} whose "${" is behind P.
+# skip_brace: past a ${...} whose "${" is behind P, parsing the command
+# substitutions in it. One inside quotes in it isn't followed, so it counts
+# as a command that doesn't parse.
 function skip_brace(   n, c) {
   n = 1
-  while (P <= N) {
+  while (P <= N && !ERR) {
     c = ch(P)
     if (c == "\\") { P += 2; continue }
+    if (c == "$" && (ch(P + 1) == "(" || ch(P + 1) == "{")) { dollar(); continue }
+    if (c == "`") { backtick(); continue }
     if (c == "'" || c == "\"") {
       P++
-      while (P <= N && ch(P) != c) P += (c == "\"" && ch(P) == "\\") ? 2 : 1
+      while (P <= N && ch(P) != c) {
+        if (c == "\"" && (ch(P) == "`" || (ch(P) == "$" && ch(P + 1) == "("))) ERR = 1
+        P += (c == "\"" && ch(P) == "\\") ? 2 : 1
+      }
       P++
       continue
     }
@@ -957,9 +1025,11 @@ function redirect(pre,   op, c, d, w) {
     else { op = "<<"; P += 2 }
   } else if (d == ">" || d == "&") { op = c d; P += 2 }
   else { op = "<"; P++ }
-  while (ch(P) == " " || ch(P) == "\t") P++
+  while (ch(P) == " " || ch(P) == "\t" || (ch(P) == "\\" && ch(P + 1) == "\n")) P += (ch(P) == "\\") ? 2 : 1
   if (CUR == 0) new_cmd()
   read_word(); w = RW
+  # A delimiter with a $'...' escape can't be matched as written.
+  if ((op == "<<" || op == "<<-") && RWA) { ERR = 1; return }
   if (op == "<<" || op == "<<-") { NH++; HD[NH] = w; HDASH[NH] = (op == "<<-"); HC[NH] = CUR; HQ[NH] = RWQ; return }
   if (op == "<<<") { print "I\t" CUR "\t" enc(w); return }
   if (op == "<" || op == "<&") return
@@ -989,6 +1059,9 @@ AWK
 
 # Programs that write the files they're given, for xargs and find -exec.
 writer_progs=" tee rm rmdir unlink shred truncate sponge mv cp ln install patch dd "
+# The programs judge_simple knows: a runner it doesn't (uv run, nix develop
+# -c) runs the first of these among its words.
+known_progs="$writer_progs sed gsed perl git find xargs bash sh zsh dash ksh eval sudo doas env timeout nice stdbuf ionice setsid nohup chronic busybox toybox flock watch "
 
 # judge_bash <command> <cwd>: best effort. The command is parsed, and only
 # the files it can write are judged: its redirect targets and the files its
@@ -1010,21 +1083,21 @@ judge_bash() {
   # whether a target or a cd is an expansion, and whether it parsed.
   local -A tnames=() ttrees=() lang_pats=()
   local -a bases=("$rcwd") lits=() existing=()
-  local unresolved="" bad_parse="" any_in_repo="" have_existing=""
+  local unresolved="" cd_unresolved="" wrote="" bad_parse="" any_in_repo="" have_existing=""
   shell_scan "$cmd" 0
   if [[ -n $bad_parse ]]; then
     ask_note="(The command could not be parsed, so it was judged on all its words.)"
     judge_bash_words "$cmd" "$root" "$rcwd"
   fi
-  # A target held in a variable or a command's output, or a cd to one: any
-  # literal path in the command may be it.
-  if [[ -n $unresolved ]]; then
-    local w
+  # A target held in a variable or a command's output, or a write after a cd
+  # to one: any literal path in the command may be it.
+  if [[ -n $unresolved || (-n $cd_unresolved && -n $wrote) ]]; then
+    local w whole=${ttrees[/]:-}
     for w in "${lits[@]}"; do
       [[ $w != -* ]] || continue
       add_target "$w" L 1
     done
-    unset 'ttrees[/]'
+    [[ -n $whole ]] || unset 'ttrees[/]'
   fi
 
   local named="" m hits="" t
@@ -1100,10 +1173,10 @@ list_existing() {
 # unesc <field>: a parser field with its escapes undone, and $PWD and $(pwd)
 # replaced by the directory the command starts in, into u.
 unesc() {
-  local v=${1//\\\\/$'\x01'}
-  v=${v//\\n/$'\n'}
-  v=${v//\\t/$'\t'}
-  v=${v//$'\x01'/\\}
+  # Every backslash in a field starts one of the parser's escapes (\\, \n or
+  # \t), so %b undoes exactly those, and in linear time.
+  local v
+  printf -v v '%b' "$1"
   # shellcheck disable=SC2016 # the literal text is what's replaced.
   v=${v//'$(pwd)'/$rcwd} v=${v//'${PWD}'/$rcwd} v=${v//'$PWD'/$rcwd}
   u=$v
@@ -1112,12 +1185,22 @@ unesc() {
 # add_target <word> <L|X|U> <tree: 0|1> [dir...]: a file the command may write,
 # resolved against each directory it may run in (and the extra ones given).
 add_target() {
-  local w=$1 x=$2 tree=$3 b abs rel dest
+  local w=$1 x=$2 tree=$3 b abs rel dest pre
   shift 3
-  if [[ $x != L && ($w == *'$'* || $w == *'`'*) ]]; then unresolved=1; return 0; fi
+  wrote=1
+  if [[ $x != L && ($w == *'$'* || $w == *'`'*) ]]; then
+    unresolved=1
+    # The directory written before the expansion: .github/workflows for
+    # .github/workflows/$f.yml.
+    pre=${w%%[\$\`]*}
+    [[ $pre == */* ]] || return 0
+    pre=${pre%/*}
+    [[ -n $pre ]] && lex "$pre" "$rcwd" && [[ $lx != "$root" ]] && add_target "$pre" L 1 "$@"
+    return 0
+  fi
   [[ -n $w && $w != *://* ]] || return 0
   for b in "${bases[@]}" "$@"; do
-    abs=$(lexical_path "$w" "$b")
+    lex "$w" "$b"; abs=$lx
     if [[ $abs == "$root" ]]; then
       ((tree)) && { ttrees[/]=1; any_in_repo=1; }
       continue
@@ -1137,7 +1220,7 @@ add_target() {
 # is_dir <word>: whether it names an existing directory from any base.
 is_dir() {
   local b
-  for b in "${bases[@]}"; do [[ -d $(lexical_path "$1" "$b") ]] && return 0; done
+  for b in "${bases[@]}"; do lex "$1" "$b"; [[ -d $lx ]] && return 0; done
   return 1
 }
 
@@ -1154,7 +1237,7 @@ shell_scan() {
   while IFS=$'\t' read -r k a b c; do
     case $k in
       C) order+=("$a"); pipe_of[$a]=$b ;;
-      W) unesc "$c"; words[$a]+=$u$'\x1f'; flags[$a]+=$b ;;
+      W) unesc "$c"; words[$a]=$u; flags[$a]=$b ;;
       R) unesc "$c"; reds[$a]+=$b$u$'\x1f' ;;
       H) unesc "$c"; docs[$a]+=$u$'\n' ;;
       I) unesc "$b"; strs[$a]+=$u$'\n' ;;
@@ -1174,27 +1257,32 @@ shell_scan() {
 
 # judge_simple <id>: the targets of one simple command from shell_scan.
 judge_simple() {
-  local id=$1 rest=${words[$1]:-} fl=${flags[$1]:-} w i=0
-  local -a ws=() fs=() pa=() pf=()
-  while [[ -n $rest ]]; do
-    w=${rest%%$'\x1f'*}; rest=${rest#*$'\x1f'}
-    ws+=("$w")
+  local id=$1 w i
+  local -a ws=() fl=() fs=() pa=() pf=()
+  IFS=$'\x1f' read -r -d '' -a ws <<<"${words[$1]:-}"
+  [[ ${ws[-1]:-} != $'\n' ]] || unset 'ws[-1]'
+  IFS=$'\x1f' read -r -d '' -a fl <<<"${flags[$1]:-}"
+  for ((i = 0; i < ${#ws[@]}; i++)); do
+    w=${ws[i]}
     # U: an expansion still unresolved.
-    if [[ ${fl:i:1} == X && ($w == *'$'* || $w == *'`'*) ]]; then fs+=(U); else
+    if [[ ${fl[i]:-} == X && ($w == *'$'* || $w == *'`'*) ]]; then fs+=(U); else
       fs+=(L)
       lits+=("$w")
       [[ $w != *=* ]] || lits+=("${w#*=}")
     fi
-    i=$((i + 1))
   done
-  local n=${#ws[@]} k=0 p xargs="" o
+  # xargs is set under xargs, and to "find" for the command find -exec runs:
+  # the files it writes come from outside.
+  local n=${#ws[@]} k=0 p xargs=${feed:-} o k0
+  local feed=""
   # Assignments and keywords before the program.
   while ((k < n)); do
     w=${ws[k]}
     if [[ $w =~ ^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?= ]]; then k=$((k + 1)); continue; fi
     case $w in
-      if | then | else | elif | do | while | until | '!' | '{' | '}' | fi | done | 'esac') k=$((k + 1)); continue ;;
-      for | select | case | in | function | '[[' | '[' | test) return 0 ;;
+      if | then | else | elif | do | while | until | '!' | '{' | '}' | fi | done | 'esac' | coproc) k=$((k + 1)); continue ;;
+      function) k=$((k + 2)); continue ;;
+      for | select | case | in | '[[' | '[' | test) return 0 ;;
     esac
     break
   done
@@ -1202,25 +1290,46 @@ judge_simple() {
   while ((k < n)); do
     p=${ws[k]##*/}
     case $p in
-      sudo | doas) k=$((k + 1)); skip_opts ugCDhprtUTc ;;
+      sudo | doas)
+        k=$((k + 1)) k0=$((k + 1))
+        skip_opts ugCDhprtUTc "--user --group --chdir --close-from --prompt --role --type --host --other-user --command-timeout"
+        for ((o = k0 - 1; o < k; o++)); do
+          case ${ws[o]} in
+            -D | --chdir) add_base "${ws[o + 1]:-.}" "${fs[o + 1]:-L}" ;;
+            --chdir=*) add_base "${ws[o]#*=}" "${fs[o]}" ;;
+          esac
+        done ;;
+      watch)
+        # watch runs its words through sh -c.
+        k=$((k + 1)); skip_opts nq "--interval --equexit"
+        shell_scan "${ws[*]:k}" $((depth + 1)); return 0 ;;
+      nix | uv | uvx | mise | fakeroot | strace | ltrace | direnv | poetry | pipenv | bundle | npx | bunx | pnpm | yarn | \
+        unbuffer | firejail | chroot | systemd-run | flatpak-spawn | doppler | dotenv | prlimit | parallel)
+        for ((o = k + 1; o < n; o++)); do [[ $known_progs != *" ${ws[o]##*/} "* ]] || break; done
+        ((o < n)) || return 0
+        k=$o ;;
       command | builtin)
-        for o in "${ws[@]:k+1}"; do [[ $o != -v && $o != -V ]] || return 0; done
+        [[ ${ws[k + 1]:-} != -v && ${ws[k + 1]:-} != -V ]] || return 0
         k=$((k + 1)); skip_opts "" ;;
-      nohup | setsid | chronic) k=$((k + 1)); skip_opts "" ;;
+      nohup | setsid | chronic | busybox | toybox) k=$((k + 1)); skip_opts "" ;;
       exec) k=$((k + 1)); skip_opts a ;;
-      time) k=$((k + 1)); skip_opts fo ;;
-      nice) k=$((k + 1)); skip_opts n ;;
-      stdbuf) k=$((k + 1)); skip_opts ioe ;;
-      ionice) k=$((k + 1)); skip_opts cnp ;;
-      timeout) k=$((k + 1)); skip_opts sk; k=$((k + 1)) ;;
-      xargs) k=$((k + 1)); skip_opts InLPsdEa; xargs=1 ;;
+      time) k=$((k + 1)); skip_opts fo "--output --format" ;;
+      nice) k=$((k + 1)); skip_opts n --adjustment ;;
+      stdbuf) k=$((k + 1)); skip_opts ioe "--input --output --error" ;;
+      ionice) k=$((k + 1)); skip_opts cnpPu "--class --classdata --pid --pgid --uid" ;;
+      timeout) k=$((k + 1)); skip_opts sk "--signal --kill-after"; k=$((k + 1)) ;;
+      xargs)
+        k=$((k + 1)); xargs=1
+        skip_opts InLPsdEa "--arg-file --delimiter --max-lines --max-args --max-procs --max-chars --process-slot-var --eof" ;;
       env)
         k=$((k + 1))
         while ((k < n)); do
           case ${ws[k]} in
             -S | --split-string) shell_scan "${ws[*]:k+1}" $((depth + 1)); return 0 ;;
             -S* | --split-string=*) o=${ws[k]#-S}; o=${o#--split-string=}; shell_scan "$o ${ws[*]:k+1}" $((depth + 1)); return 0 ;;
-            -u | -C | --unset | --chdir) k=$((k + 2)) ;;
+            -C | --chdir) add_base "${ws[k + 1]:-.}" "${fs[k + 1]:-L}"; k=$((k + 2)) ;;
+            -C?* | --chdir=*) o=${ws[k]#-C}; add_base "${o#--chdir=}" "${fs[k]}"; k=$((k + 1)) ;;
+            -u | --unset) k=$((k + 2)) ;;
             -*) k=$((k + 1)) ;;
             *=*) k=$((k + 1)) ;;
             *) break ;;
@@ -1230,33 +1339,41 @@ judge_simple() {
         for ((o = k + 1; o < n; o++)); do
           if [[ ${ws[o]} == -c || ${ws[o]} == --command ]]; then shell_scan "${ws[o + 1]:-}" $((depth + 1)); return 0; fi
         done
-        k=$((k + 1)); skip_opts wE; k=$((k + 1)) ;;
+        k=$((k + 1)); skip_opts wE "--timeout --conflict-exit-code"; k=$((k + 1)) ;;
       *) break ;;
     esac
   done
   ((k < n)) || return 0
   p=${ws[k]##*/}
   local -a args=("${ws[@]:k+1}") afs=("${fs[@]:k+1}")
-  if [[ -n $xargs && $writer_progs == *" $p "* ]]; then unresolved=1; fi
+  [[ -z $xargs || $writer_progs != *" $p "* ]] || fed_write
   case $p in
     bash | sh | zsh | dash | ksh) shell_input ;;
     eval) shell_scan "${args[*]}" $((depth + 1)) ;;
     cd | pushd) cd_to ;;
     sed | gsed | perl) in_place ;;
     tee | sponge | unlink | shred) plain_args ""; add_all 0 ;;
-    truncate) plain_args sr; add_all 0 ;;
+    truncate) plain_args sr "--reference --size"; add_all 0 ;;
     rm | rmdir) plain_args ""; add_all 1 ;;
     mv | cp | ln | install) to_dest ;;
     dd) for ((i = 0; i < ${#args[@]}; i++)); do [[ ${args[i]} != of=* ]] || add_target "${args[i]#of=}" "${afs[i]}" 0; done ;;
-    patch) unresolved=1; diff_paths ;;
+    patch) diff_paths ;;
     git) git_cmd ;;
     find) find_cmd ;;
   esac
   return 0
 }
 
-# skip_opts <letters>: k past the options at k; a short option in <letters>
-# takes an argument (the rest of its word, or the next word).
+# fed_write: the command writes files that come from outside (xargs, find
+# -exec): under find, find's files are written; under xargs, any.
+fed_write() {
+  wrote=1
+  if [[ $xargs == find ]]; then fwrites=1; else unresolved=1; fi
+}
+
+# skip_opts <letters> [long options]: k past the options at k; a short
+# option in <letters> takes an argument (the rest of its word, or the next
+# word), as does a long option in the list without an =.
 skip_opts() {
   local o j
   while ((k < n)); do
@@ -1264,15 +1381,19 @@ skip_opts() {
     [[ $o == -?* ]] || return 0
     k=$((k + 1))
     [[ $o != -- ]] || return 0
-    [[ $o != --* ]] || continue
+    if [[ $o == --* ]]; then
+      [[ $o == *=* || " ${2:-} " != *" $o "* ]] || k=$((k + 1))
+      continue
+    fi
     for ((j = 1; j < ${#o}; j++)); do
       if [[ -n $1 && $1 == *"${o:j:1}"* ]]; then ((j + 1 < ${#o})) || k=$((k + 1)); break; fi
     done
   done
 }
 
-# plain_args <letters>: the arguments that aren't options into pa (and their
-# flags into pf); a short option in <letters> takes an argument.
+# plain_args <letters> [long options]: the arguments that aren't options
+# into pa (and their flags into pf); a short option in <letters> takes an
+# argument, as does a long option in the list without an =.
 plain_args() {
   local i o j rest=""
   pa=() pf=()
@@ -1283,7 +1404,10 @@ plain_args() {
       continue
     fi
     [[ $o != -- ]] || { rest=1; continue; }
-    [[ $o != --* ]] || continue
+    if [[ $o == --* ]]; then
+      [[ $o == *=* || " ${2:-} " != *" $o "* ]] || i=$((i + 1))
+      continue
+    fi
     for ((j = 1; j < ${#o}; j++)); do
       if [[ -n $1 && $1 == *"${o:j:1}"* ]]; then ((j + 1 < ${#o})) || i=$((i + 1)); break; fi
     done
@@ -1303,11 +1427,15 @@ shell_input() {
   local i o stdin=1 c=""
   for ((i = 0; i < ${#args[@]}; i++)); do
     o=${args[i]}
-    if [[ -n $c ]]; then shell_scan "$o" $((depth + 1)); return 0; fi
+    if [[ -n $c ]]; then
+      [[ $o != -- ]] || continue
+      shell_scan "$o" $((depth + 1)); return 0
+    fi
     case $o in
       --) continue ;;
-      -o | +o) i=$((i + 1)) ;;
+      -o | +o | -O | +O) i=$((i + 1)) ;;
       --*) ;;
+      -*n*) return 0 ;;
       [-+]*c*) c=1 ;;
       [-+]*s*) stdin=1; break ;;
       [-+]*) ;;
@@ -1330,21 +1458,29 @@ shell_input() {
   [[ -z ${text//[[:space:]]/} ]] || shell_scan "$text" $((depth + 1))
 }
 
-# cd_to: the directory a cd or pushd moves to is a base for what follows;
-# one held in a variable is unknown.
+# cd_to: the directory a cd or pushd moves to is a base for what follows.
 cd_to() {
-  local i nb b
+  local i
   for ((i = 0; i < ${#args[@]}; i++)); do
     [[ ${args[i]} != -* ]] || continue
-    if [[ ${afs[i]} == U ]]; then unresolved=1; return 0; fi
-    local -a more=()
-    for b in "${bases[@]}"; do
-      nb=$(lexical_path "${args[i]}" "$b")
-      [[ " ${bases[*]} ${more[*]} " == *" $nb "* ]] || more+=("$nb")
-    done
-    bases+=("${more[@]}")
+    add_base "${args[i]}" "${afs[i]}"
     return 0
   done
+}
+
+# add_base <dir> <L|U>: <dir>, from each base, is a base too (the command
+# may or may not have moved there). One held in a variable is unknown, as
+# are more than 16 bases.
+add_base() {
+  local nb b
+  if [[ $2 == U ]]; then cd_unresolved=1; return 0; fi
+  local -a more=()
+  for b in "${bases[@]}"; do
+    lex "$1" "$b"; nb=$lx
+    [[ " ${bases[*]} ${more[*]} " == *" $nb "* ]] || more+=("$nb")
+  done
+  if ((${#bases[@]} + ${#more[@]} > 16)); then cd_unresolved=1; return 0; fi
+  bases+=("${more[@]}")
 }
 
 # in_place: sed, gsed or perl, which write only with -i (or --in-place); then
@@ -1375,16 +1511,18 @@ in_place() {
     done
   done
   [[ -n $ip ]] || return 0
+  # Under xargs, the files come from its input.
+  [[ -z $xargs ]] || fed_write
   [[ -n $script ]] || { files=("${files[@]:1}"); ffl=("${ffl[@]:1}"); }
   for ((i = 0; i < ${#files[@]}; i++)); do add_target "${files[i]}" "${ffl[i]}" 0; done
 }
 
 # to_dest: mv, cp, ln and install write their destination: the last argument
-# or -t DIR; into a directory, as DIR/<source name>. mv also removes its
-# sources, and install -d makes every argument. ln with one argument links in
-# the working directory.
+# or -t DIR; into a directory, as DIR/<source name>, and with cp -r every
+# file under it. mv also removes its sources, and install -d makes every
+# argument. ln with one argument links in the working directory.
 to_dest() {
-  local i o j tdir="" tflag=L nodir="" dmode="" rest="" dest dflag into="" s
+  local i o j tdir="" tflag=L nodir="" dmode="" rest="" dest dflag into="" s rec=0
   local -a pos=() posf=()
   for ((i = 0; i < ${#args[@]}; i++)); do
     o=${args[i]}
@@ -1395,10 +1533,12 @@ to_dest() {
       --target-directory) tdir=${args[i + 1]:-}; tflag=${afs[i + 1]:-L}; i=$((i + 1)); continue ;;
       --no-target-directory) nodir=1; continue ;;
       --directory) dmode=1; continue ;;
+      --recursive | --archive) rec=1; continue ;;
       --*) continue ;;
     esac
     for ((j = 1; j < ${#o}; j++)); do
       case ${o:j:1} in
+        r | R | a) [[ $p != cp ]] || rec=1 ;;
         t)
           if ((j + 1 < ${#o})); then tdir=${o:j+1}; tflag=${afs[i]}; else tdir=${args[i + 1]:-}; tflag=${afs[i + 1]:-L}; i=$((i + 1)); fi
           break ;;
@@ -1418,6 +1558,11 @@ to_dest() {
     dest=${pos[-1]} dflag=${posf[-1]}
     unset 'pos[-1]' 'posf[-1]'
     [[ -z $nodir ]] && { [[ $dest == */ ]] || is_dir "$dest"; } && into=1
+  elif ((${#pos[@]} == 1)) && [[ -n $xargs ]]; then
+    # The sources come from outside, into this destination.
+    fed_write
+    add_target "${pos[0]}" "${posf[0]}" 1
+    return 0
   elif ((${#pos[@]} == 1)) && [[ $p == ln ]]; then
     s=${pos[0]%/}
     add_target "${s##*/}" "${posf[0]}" 0
@@ -1430,16 +1575,19 @@ to_dest() {
     if [[ -n $into ]]; then
       s=${pos[i]%/}
       [[ ${posf[i]} == L ]] || dflag=U
-      add_target "${dest%/}/${s##*/}" "$dflag" 0
+      add_target "${dest%/}/${s##*/}" "$dflag" "$rec"
     fi
   done
-  add_target "$dest" "$dflag" 0
+  [[ -n $into ]] || add_target "$dest" "$dflag" "$rec"
 }
 
 # diff_paths: the files a heredoc diff fed to patch or git apply names, with
-# their a/ and b/ prefixes and without.
+# their a/ and b/ prefixes and without. A diff from anywhere else may name
+# any file.
 diff_paths() {
   local line f
+  wrote=1
+  [[ -n ${docs[$id]:-}${strs[$id]:-} ]] || unresolved=1
   while IFS= read -r line; do
     case $line in
       '+++ '* | '--- '*) f=${line:4}; f=${f%%$'\t'*} ;;
@@ -1448,24 +1596,20 @@ diff_paths() {
     [[ $f != /dev/null ]] || continue
     add_target "$f" L 0
     [[ $f != [ab]/* ]] || add_target "${f:2}" L 0
-  done <<<"${docs[$id]:-}"
+  done <<<"${docs[$id]:-}${strs[$id]:-}"
 }
 
 # git_cmd: git checkout, restore, rm and mv write the paths they're given
 # (every file under a directory); apply writes the files its patch names.
 # -C and --work-tree are bases for the paths.
 git_cmd() {
-  local i=0 o sub b nb
-  local -a extra=()
+  local i=0 o sub
+  local -a extra=("${bases[@]}")
   while ((i < ${#args[@]})); do
     o=${args[i]}
     case $o in
-      -C | --work-tree)
-        for b in "${bases[@]}"; do nb=$(lexical_path "${args[i + 1]:-.}" "$b"); extra+=("$nb"); done
-        i=$((i + 2)) ;;
-      --work-tree=*)
-        for b in "${bases[@]}"; do nb=$(lexical_path "${o#*=}" "$b"); extra+=("$nb"); done
-        i=$((i + 1)) ;;
+      -C | --work-tree) git_dir "${args[i + 1]:-.}" "${afs[i + 1]:-L}"; i=$((i + 2)) ;;
+      --work-tree=*) git_dir "${o#*=}" "${afs[i]}"; i=$((i + 1)) ;;
       -c | --git-dir | --namespace | --exec-path | --super-prefix | --config-env) i=$((i + 2)) ;;
       -*) i=$((i + 1)) ;;
       *) break ;;
@@ -1473,25 +1617,35 @@ git_cmd() {
   done
   sub=${args[i]:-}
   case $sub in
-    checkout | restore | rm | mv) ;;
-    apply) unresolved=1; diff_paths; return 0 ;;
+    checkout | restore | rm | mv) [[ -z $xargs ]] || fed_write ;;
+    apply) diff_paths; return 0 ;;
     *) return 0 ;;
   esac
   local -a saved=("${bases[@]}")
-  ((${#extra[@]} == 0)) || bases=("${extra[@]}")
+  bases=("${extra[@]}")
   args=("${args[@]:i+1}") afs=("${afs[@]:i+1}")
   plain_args bBsU
   add_all 1
   bases=("${saved[@]}")
 }
 
+# git_dir <dir> <L|U>: each -C moves on from the one before it.
+git_dir() {
+  local e
+  local -a next=()
+  if [[ $2 == U ]]; then cd_unresolved=1; return 0; fi
+  for e in "${extra[@]}"; do lex "$1" "$e"; next+=("$lx"); done
+  extra=("${next[@]}")
+}
+
 # find_cmd: find with -delete, or -exec running a writer, writes what it
 # finds under its start paths: the protected files there that its -name and
-# -path filters can match (every one, without a filter). A filter is also a
-# file name for the suppression rules.
+# -path filters can match (every one, without a filter, or with ! or -o). A
+# filter is also a file name for the suppression and Cargo.toml rules. The
+# command -exec runs is judged too, without the {}.
 find_cmd() {
-  local i=0 o writes="" e pat
-  local -a starts=() names=() paths=()
+  local i=0 j o writes="" e pat filtered=1 key ew ef fwrites=""
+  local -a starts=() names=() paths=() inames=() ipaths=()
   while ((i < ${#args[@]})) && [[ ${args[i]} == -[HLP] || ${args[i]} == -O* ]]; do i=$((i + 1)); done
   while ((i < ${#args[@]})) && [[ ${args[i]} != -* && ${args[i]} != '(' && ${args[i]} != '!' ]]; do
     [[ ${afs[i]} == L ]] || unresolved=1
@@ -1500,43 +1654,67 @@ find_cmd() {
   for (( ; i < ${#args[@]}; i++)); do
     o=${args[i]}
     case $o in
-      -name | -iname) names+=("${args[i + 1]:-}"); i=$((i + 1)) ;;
-      -path | -ipath | -wholename | -iwholename) paths+=("${args[i + 1]:-}"); i=$((i + 1)) ;;
+      -name) names+=("${args[i + 1]:-}"); i=$((i + 1)) ;;
+      -iname) inames+=("${args[i + 1],,}"); i=$((i + 1)) ;;
+      -path | -wholename) paths+=("${args[i + 1]:-}"); i=$((i + 1)) ;;
+      -ipath | -iwholename) ipaths+=("${args[i + 1],,}"); i=$((i + 1)) ;;
+      '!' | -not | -o | -or | ,) filtered="" ;;
       -delete) writes=1 ;;
       -exec | -execdir | -ok | -okdir)
         e=${args[i + 1]:-}; e=${e##*/}
-        if [[ $writer_progs == *" $e "* ]]; then writes=1
-        elif [[ $e == sed || $e == gsed || $e == perl ]]; then
-          for ((i = i + 2; i < ${#args[@]}; i++)); do
-            [[ ${args[i]} != ';' && ${args[i]} != + ]] || break
-            [[ ${args[i]} =~ ^-[^-eEf]*i|^--in-place ]] && writes=1
-          done
-        fi ;;
+        ew="" ef=""
+        for ((j = i + 1; j < ${#args[@]}; j++)); do
+          [[ ${args[j]} != ';' && ${args[j]} != + ]] || break
+          [[ ${args[j]} == '{}' ]] && continue
+          ew+=${args[j]}$'\x1f'
+          if [[ ${afs[j]} == U ]]; then ef+=X$'\x1f'; else ef+=L$'\x1f'; fi
+          [[ $e != sed && $e != gsed && $e != perl ]] || [[ ! ${args[j]} =~ ^-[^-eEf]*i|^--in-place ]] || writes=1
+        done
+        [[ $writer_progs != *" $e "* ]] || writes=1
+        key="$id.$i"
+        words[$key]=$ew flags[$key]=$ef
+        feed="find" judge_simple "$key"
+        i=$j ;;
     esac
   done
-  [[ -n $writes ]] || return 0
+  [[ -n $writes$fwrites ]] || return 0
   ((${#starts[@]} > 0)) || starts=(.)
-  if ((${#names[@]} + ${#paths[@]} == 0)); then
+  wrote=1
+  if [[ -z $filtered ]] || ((${#names[@]} + ${#paths[@]} + ${#inames[@]} + ${#ipaths[@]} == 0)); then
     for o in "${starts[@]}"; do add_target "$o" L 1; done
     return 0
   fi
-  for pat in "${names[@]}" "${paths[@]}"; do lang_pats[$pat]=1; done
+  for pat in "${names[@]}" "${paths[@]}" "${inames[@]}" "${ipaths[@]}"; do
+    lang_pats[$pat]=1
+    # shellcheck disable=SC2053 # the pattern is meant to match.
+    [[ Cargo.toml != ${pat##*/} && cargo.toml != ${pat##*/} ]] || tnames[Cargo.toml]=1
+  done
   list_existing "$root"
-  local s srel f b
+  local s srel f b l
   for o in "${starts[@]}"; do
     for b in "${bases[@]}"; do
-      s=$(lexical_path "$o" "$b")
+      lex "$o" "$b"; s=$lx
       [[ $s == "$root" || $s == "$root"/* ]] || continue
+      any_in_repo=1
       srel=${s#"$root"}; srel=${srel#/}
       for f in "${existing[@]}"; do
-        [[ -z $srel || $f == "$srel"/* ]] || continue
+        [[ -z $srel || $f == "$srel" || $f == "$srel"/* ]] || continue
+        l=${f,,}
         for pat in "${names[@]}"; do
           # shellcheck disable=SC2053 # the pattern is meant to match.
-          [[ ${f##*/} == $pat ]] && tnames[$f]=1 any_in_repo=1
+          [[ ${f##*/} == $pat ]] && tnames[$f]=1
+        done
+        for pat in "${inames[@]}"; do
+          # shellcheck disable=SC2053 # the pattern is meant to match.
+          [[ ${l##*/} == $pat ]] && tnames[$f]=1
         done
         for pat in "${paths[@]}"; do
           # shellcheck disable=SC2053 # the pattern is meant to match.
-          [[ $f == $pat || ./$f == $pat || $o/${f#"$srel"/} == $pat ]] && tnames[$f]=1 any_in_repo=1
+          [[ $f == $pat || ./$f == $pat || $o/${f#"$srel"/} == $pat ]] && tnames[$f]=1
+        done
+        for pat in "${ipaths[@]}"; do
+          # shellcheck disable=SC2053 # the pattern is meant to match.
+          [[ $l == $pat || ./$l == $pat || ${o,,}/${l#"${srel,,}"/} == $pat ]] && tnames[$f]=1
         done
       done
     done
