@@ -112,10 +112,9 @@ new_repo
 #   a. That hook ignores a repository without a root Cargo.toml. This one
 #      protects every git repository, with the detector's built-in list, so
 #      the "not ours" cases at the end now ask (and are renamed to say so).
-#   b. docs/CODEOWNERS is not in the detector's built-in list, so writing it is
-#      silent here (the Rust hook asked). .lefthook.yaml was covered by that
-#      hook's kind() but isn't in the built-in list either: also silent.
-#   c. The no-jq PATH also needs mktemp, rm and tr (see the top of the file).
+#   b. The no-jq PATH also needs mktemp, rm and tr (see the top of the file).
+#   c. Any Bash write to a Cargo.toml asks, as in rust-ci v3's hook, so
+#      "sed -i on Cargo.toml dependencies" now asks.
 # The reason texts differ too: "<path> is check config", "adds or widens a lint
 # or test suppression", and so on.
 # ---------------------------------------------------------------------------
@@ -127,8 +126,9 @@ for p in deny.toml clippy.toml .clippy.toml crates/lib/clippy.toml rustfmt.toml 
   .github/actions/a/b/c.sh lefthook.yml .gitleaks.toml .github/CODEOWNERS CODEOWNERS; do
   write "Write to ${p} asks" "${p}" 'x = 1' ask "${p} is check config"
 done
-write "Write to docs/CODEOWNERS is silent (not in the built-in list)" docs/CODEOWNERS 'x = 1' silent
-write "Write to .lefthook.yaml is silent (not in the built-in list)" .lefthook.yaml 'x = 1' silent
+for p in docs/CODEOWNERS .lefthook.yaml; do
+  write "Write to ${p} asks (the hook's own list)" "${p}" 'x = 1' ask "${p} is check config"
+done
 edit "Edit to deny.toml asks" deny.toml '[bans]' '[bans]
 multiple-versions = "allow"' ask "deny.toml is check config"
 edit "the reason names the opt-out" deny.toml '[bans]' '' ask "WEAKENED_CHECKS_PROTECT_CONFIG=off"
@@ -209,7 +209,7 @@ bash_cmd "sed -i on Cargo.toml lints asks" "sed -i '/\\[workspace.lints/,\$d' Ca
 bash_cmd "appending #[allow( to a .rs file asks" "printf '#[allow(dead_code)]\\n' >> crates/lib/src/lib.rs" ask "writes a lint or test suppression"
 bash_cmd "reading deny.toml does not ask" "cat deny.toml | grep bans" silent
 bash_cmd "cargo test does not ask" "cargo test --workspace 2>&1 | tail" silent
-bash_cmd "sed -i on Cargo.toml dependencies does not ask" "sed -i 's/serde = \"1\"/serde = \"2\"/' Cargo.toml" silent
+bash_cmd "sed -i on Cargo.toml dependencies asks" "sed -i 's/serde = \"1\"/serde = \"2\"/' Cargo.toml" ask "a Cargo.toml"
 bash_cmd "a .rs write without a suppression does not ask" "printf 'fn x() {}\\n' >> crates/lib/src/lib.rs" silent
 
 # Opt-out.
@@ -481,6 +481,259 @@ HOOK_PATH="${norp}" write "without realpath a protected Write still asks" deny.t
 fakejq="${work}/fakejq"
 mkdir -p "${fakejq}" && printf '#!/bin/sh\nexit 1\n' >"${fakejq}/jq" && chmod +x "${fakejq}/jq"
 HOOK_PATH="${fakejq}:${PATH}" write "a jq that fails still gives JSON, never silence" deny.toml 'x' context "could not read the hook input"
+
+# ---------------------------------------------------------------------------
+# New: what rust-ci v3's hook asked for and this one didn't (#5).
+# ---------------------------------------------------------------------------
+
+new_repo
+# The hook's own paths, beside the built-in list.
+for p in lefthook-local.yml lefthook-local.yaml .lefthook-local.yml .gitattributes crates/lib/.gitattributes \
+  build.rs crates/lib/build.rs .github/zizmor.yml .github/zizmor.yaml .github/actionlint.yml .github/actionlint.yaml; do
+  write "Write to ${p} asks (the hook's own list)" "${p}" 'x = 1' ask "${p} is check config"
+done
+bash_cmd "writing a .gitattributes asks" "echo '*.rs -diff' > crates/lib/.gitattributes" ask "crates/lib/.gitattributes"
+bash_cmd "cp onto build.rs asks" "cp /tmp/b.rs build.rs" ask "build.rs"
+bash_cmd "tee into lefthook-local.yml asks" "echo 'skip_output: true' | tee lefthook-local.yml" ask
+bash_cmd "a redirect into .github/zizmor.yml asks" "printf 'rules: {}\\n' > .github/zizmor.yml" ask
+bash_cmd "reading build.rs does not ask" "cat build.rs" silent
+commit_conf 'config-path @defaults'
+write "config from main: @defaults keeps the hook's own paths" build.rs 'x' ask "build.rs is check config"
+commit_conf 'config-path only.cfg'
+write "config from main: without @defaults the hook's own paths are silent" build.rs 'x' silent
+commit_conf 'frobnicate x'
+write "a config that doesn't parse still protects the hook's own paths" build.rs 'x' ask "build.rs is check config"
+commit_conf 'disable check-config'
+write "disable check-config: the hook's own paths are silent" build.rs 'x' silent
+
+# Cargo.toml: [profile] tables, and the table a dotted lints key sits under.
+new_repo
+edit "adding a [profile] setting asks" Cargo.toml 'serde = "1"' 'serde = "1"
+
+[profile.release]
+overflow-checks = false' ask "[profile]"
+printf '[package]\nname = "lib"\n\n[profile.dev]\ndebug-assertions = true\n\n[lints]\nworkspace = true\n' >"${r}/crates/lib/Cargo.toml"
+edit "changing a [profile] value asks" crates/lib/Cargo.toml 'debug-assertions = true' 'debug-assertions = false' ask "[profile]"
+edit "an inline profile table at the root asks" crates/lib/Cargo.toml '[package]' 'profile = { dev = { overflow-checks = false } }
+[package]' ask
+edit "a profile key under [package] does not ask" crates/lib/Cargo.toml 'name = "lib"' 'name = "lib"
+profile = "x"' silent
+mkdir -p "${r}/crates/dot"
+printf '# dot crate\nlints.clippy.unwrap_used = "deny"\n\n[package]\nname = "dot"\n' >"${r}/crates/dot/Cargo.toml"
+write "a Write moving a dotted lints key under another table asks" crates/dot/Cargo.toml '# dot crate
+[package.metadata]
+lints.clippy.unwrap_used = "deny"
+
+[package]
+name = "dot"
+' ask "[lints]"
+edit "an Edit putting a table header above a dotted lints key asks" crates/dot/Cargo.toml '# dot crate' '# dot crate
+[package.metadata]' ask "[lints]"
+edit "an Edit below the dotted lints key outside lints does not ask" crates/dot/Cargo.toml 'name = "dot"' 'name = "dots"' silent
+edit "an Edit adding a table header outside lints does not ask" Cargo.toml 'serde = "1"' 'serde = "1"
+
+[workspace.package]
+edition = "2024"' silent
+write "a lints table written another way, same lints, does not ask" Cargo.toml '[workspace]
+members = ["crates/*"]
+
+[workspace.dependencies]
+serde = "1"
+
+[workspace.lints]
+clippy.unwrap_used = "deny"
+' silent
+write "the same lints written another way with a weaker level asks" Cargo.toml '[workspace]
+members = ["crates/*"]
+
+[workspace.dependencies]
+serde = "1"
+
+[workspace.lints]
+clippy.unwrap_used = "warn"
+' ask "[workspace.lints]"
+printf '[workspace]\nmembers = [\n  "crates/*",\n]\n\n[workspace.lints.rust]\nunexpected_cfgs = { level = "warn", check-cfg = [\n  "cfg(a)",\n] }\n' >"${r}/Cargo.toml"
+edit "a line of a multi-line array in a lints table asks" Cargo.toml '  "cfg(a)",' '  "cfg(a)",
+  "cfg(b)",' ask
+edit "a line of a multi-line array outside lints does not ask" Cargo.toml '  "crates/*",' '  "crates/*",
+  "tools/*",' silent
+edit "an array line that looks like a header is not taken for one" Cargo.toml '  "crates/*",' '  "crates/*",
+  ["x"]
+' silent
+new_repo
+commit_conf 'disable cargo-lint-levels'
+edit "disable cargo-lint-levels: a [profile] edit is silent" Cargo.toml 'serde = "1"' 'serde = "1"
+[profile.dev]
+opt-level = 0' silent
+
+# .rs files: more suppressions, and removed lint attributes.
+new_repo
+edit "an edit adding #[should_panic] asks" crates/lib/src/lib.rs 'pub fn a() {}' '#[test] #[should_panic] fn t() {}' ask "#[should_panic]"
+edit "an edit adding #[should_panic(expected)] asks" crates/lib/src/lib.rs 'pub fn a() {}' '#[test]
+#[should_panic(expected = "boom")]
+fn t() {}' ask
+edit "an edit adding #[cfg(miri)] asks" crates/lib/src/lib.rs 'pub fn a() {}' '#[cfg(miri)] pub fn a() {}' ask
+edit "an edit adding #[cfg(windows)] does not ask" crates/lib/src/lib.rs 'pub fn a() {}' '#[cfg(windows)] pub fn a() {}' silent
+edit "respacing an #[allow] does not ask" crates/lib/src/lib.rs '#[allow(dead_code)]' '#[allow( dead_code )]' silent
+edit "respacing an #[allow] while widening it asks, showing it as written" crates/lib/src/lib.rs '#[allow(dead_code)]' '#[allow( dead_code, unused )]' ask "#[allow( dead_code, unused )]"
+d_rs='#![forbid(unsafe_code)]
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
+#[warn(missing_docs)]
+#[cfg_attr(test, deny(dead_code))]
+pub fn a() {}
+'
+printf '%s' "${d_rs}" >"${r}/crates/lib/src/d.rs"
+edit "removing a #![forbid] asks" crates/lib/src/d.rs '#![forbid(unsafe_code)]
+' '' ask "#![forbid(unsafe_code)]"
+edit "narrowing a #![deny] list asks" crates/lib/src/d.rs 'clippy::unwrap_used, clippy::expect_used' 'clippy::unwrap_used' ask "#![deny(clippy::expect_used)]"
+edit "widening a #![deny] list does not ask" crates/lib/src/d.rs 'clippy::unwrap_used, clippy::expect_used' 'clippy::unwrap_used, clippy::expect_used, clippy::panic' silent
+edit "turning #[warn] into #[allow] asks" crates/lib/src/d.rs '#[warn(missing_docs)]' '#[allow(missing_docs)]' ask
+edit "removing a cfg_attr deny asks" crates/lib/src/d.rs '#[cfg_attr(test, deny(dead_code))]
+' '' ask "removes or narrows a lint attribute"
+edit "respacing a #![deny] does not ask" crates/lib/src/d.rs '#![deny(clippy::unwrap_used, clippy::expect_used)]' '#![deny( clippy::unwrap_used,  clippy::expect_used )]' silent
+edit "an unrelated edit next to a #![deny] does not ask" crates/lib/src/d.rs 'pub fn a() {}' 'pub fn b() {}' silent
+write "a Write dropping a #![deny] asks" crates/lib/src/d.rs '#![forbid(unsafe_code)]
+
+#[warn(missing_docs)]
+#[cfg_attr(test, deny(dead_code))]
+pub fn a() {}
+' ask "#![deny("
+write "a Write moving the lint attributes does not ask" crates/lib/src/d.rs "// moved
+${d_rs}" silent
+edit "an edit whose old text isn't in the file is judged on its own text" crates/lib/src/d.rs '#![deny(clippy::panic)]' '' ask "#![deny(clippy::panic)]"
+bash_cmd "sed -i deleting a deny line asks" "sed -i '/deny(/d' crates/lib/src/d.rs" ask "deny or forbid"
+bash_cmd "grep for deny in a .rs file does not ask" "grep -n deny crates/lib/src/d.rs" silent
+commit_conf 'disable rust-allow'
+edit "disable rust-allow: removing a #![forbid] is silent" crates/lib/src/d.rs '#![forbid(unsafe_code)]
+' '' silent
+bash_cmd "disable rust-allow: sed -i deleting a deny line is silent" "sed -i '/deny(/d' crates/lib/src/d.rs" silent
+
+# gitleaks:allow, in any file.
+new_repo
+edit "an edit adding gitleaks:allow to a .rs file asks" crates/lib/src/lib.rs 'pub fn a() {}' 'const K: &str = "k"; // gitleaks:allow' ask "gitleaks:allow"
+write "a Markdown file gaining gitleaks:allow asks" NOTES.md 'token: abc <!-- gitleaks:allow -->' ask "secret scanning"
+write "a Cargo.toml gaining gitleaks:allow asks" crates/lib/Cargo.toml "$(cat "${r}/crates/lib/Cargo.toml")
+# gitleaks:allow" ask "gitleaks:allow"
+printf 'key = abc # gitleaks\n' >"${r}/app.ini"
+edit "an edit completing a gitleaks:allow asks" app.ini '# gitleaks' '# gitleaks:allow' ask "gitleaks:allow"
+printf 'key = abc # gitleaks:allow\n' >"${r}/app.ini"
+edit "an edit keeping a gitleaks:allow does not ask" app.ini 'key = abc' 'key = abd' silent
+bash_cmd "appending gitleaks:allow to any file asks" "echo 'key = abc # gitleaks:allow' >> config/app.ini" ask "gitleaks:allow"
+bash_cmd "grep for gitleaks:allow does not ask" "grep -rn gitleaks:allow ." silent
+HOOK_PATH="${nojq}" write "missing jq is reported for a gitleaks:allow in any file" NOTES.md 'x <!-- gitleaks:allow -->' context "jq is not on PATH"
+commit_conf 'disable cargo-lint-levels'
+write "disable cargo-lint-levels: a Cargo.toml gaining gitleaks:allow still asks" crates/lib/Cargo.toml "$(cat "${r}/crates/lib/Cargo.toml")
+# gitleaks:allow" ask "gitleaks:allow"
+
+# Bash: any write to a Cargo.toml, and Rust suppressions written another way.
+new_repo
+bash_cmd "sed -i on Cargo.toml without the word lints asks" "sed -i '/unsafe_code/a warnings = \"allow\"' Cargo.toml" ask "a Cargo.toml"
+bash_cmd "perl -i on a member Cargo.toml asks" "perl -i -pe 's/workspace = true//' crates/lib/Cargo.toml" ask
+bash_cmd "appending to Cargo.toml asks" "printf '[profile.dev]\\nopt-level = 1\\n' >> Cargo.toml" ask
+bash_cmd "mv onto Cargo.toml asks" "mv /tmp/x.toml Cargo.toml" ask
+bash_cmd "reading Cargo.toml does not ask" "grep -n lints Cargo.toml" silent
+bash_cmd "cargo add does not ask" "cargo add serde --features derive" silent
+bash_cmd "--manifest-path with a tee does not ask" "cargo test --manifest-path crates/lib/Cargo.toml 2>&1 | tee test.log" silent
+bash_cmd "--manifest-path= with a tee does not ask" "cargo build --manifest-path=crates/lib/Cargo.toml | tee build.log" silent
+bash_cmd "sed -i adding #[ allow(...)] with a space asks" "sed -i 's/^pub fn a/#[ allow(warnings)]\\npub fn a/' crates/lib/src/lib.rs" ask
+bash_cmd "sed -i adding an escaped #\\[allow( asks" "sed -i 's/^pub fn a/#\\[allow(warnings)]\\npub fn a/' crates/lib/src/lib.rs" ask
+bash_cmd "appending #[should_panic] asks" "printf '#[should_panic]\\n' >> crates/lib/src/lib.rs" ask
+bash_cmd "appending #[cfg_attr(miri, ignore)] asks" "printf '#[cfg_attr(miri, ignore)]\\n' >> crates/lib/src/lib.rs" ask
+bash_cmd "appending #[cfg(miri)] asks" "printf '#[cfg( miri )]\\n' >> crates/lib/src/lib.rs" ask
+bash_cmd "appending #[rustfmt::skip] asks" "printf '#[rustfmt::skip]\\n' >> crates/lib/src/lib.rs" ask
+
+# ---------------------------------------------------------------------------
+# New: Claude Code's project settings and hooks, which can turn this hook off
+# (#6).
+# ---------------------------------------------------------------------------
+
+new_repo
+mkdir -p "${r}/.claude/hooks" "${r}/apps/web/.claude"
+printf '{}\n' >"${r}/.claude/settings.json"
+printf '{}\n' >"${r}/.claude/settings.local.json"
+printf '#!/bin/sh\n' >"${r}/.claude/hooks/check.sh"
+printf '{}\n' >"${r}/apps/web/.claude/settings.local.json"
+for p in .claude/settings.json .claude/settings.local.json .claude/hooks/check.sh .claude/hooks/new.sh \
+  apps/web/.claude/settings.local.json apps/web/.claude/settings.json apps/web/.claude/hooks/x.sh; do
+  write "Write to ${p} asks" "${p}" '{"env": {"WEAKENED_CHECKS_PROTECT_CONFIG": "off"}}' ask "${p} is Claude Code's project settings"
+done
+for p in .claude/settings.json .claude/settings.local.json .claude/hooks/check.sh apps/web/.claude/settings.local.json; do
+  edit "Edit to ${p} asks" "${p}" '{}' '{"env": {"WEAKENED_CHECKS_PROTECT_CONFIG": "off"}}' ask "${p} is Claude Code's project settings"
+  bash_cmd "a Bash redirect into ${p} asks" "echo '{}' > ${p}" ask "${p}"
+done
+bash_cmd "sed -i on .claude/settings.local.json asks" "sed -i 's/{}/{\"disableAllHooks\": true}/' .claude/settings.local.json" ask
+bash_cmd "rm -rf .claude/hooks asks" "rm -rf .claude/hooks" ask ".claude/hooks"
+bash_cmd "mv .claude/hooks away asks" "mv .claude/hooks /tmp/hooks" ask ".claude/hooks"
+bash_cmd "rm -rf .claude asks" "rm -rf .claude" ask ".claude"
+bash_cmd "rm -rf apps/web asks for its .claude" "rm -rf apps/web" ask "apps/web"
+write "a Write to .claude/commands does not ask" .claude/commands/x.md '# x' silent
+write "a file merely named settings.json elsewhere does not ask" config/settings.json '{}' silent
+bash_cmd "reading .claude/settings.json does not ask" "cat .claude/settings.json" silent
+printf '.claude/settings.local.json\n' >"${r}/.gitignore"
+bash_cmd "a Bash write to a gitignored settings.local.json asks" "printf '{}' > .claude/settings.local.json" ask
+bash_cmd "rm -rf .claude asks with only a gitignored settings.local.json" "rm -f .claude/settings.json && rm -rf .claude" ask
+commit_conf 'disable check-config'
+write "disable check-config: .claude/settings.json still asks" .claude/settings.json '{}' ask ".claude/settings.json is Claude Code's project settings"
+commit_conf 'config-path @defaults :(exclude).claude/** :(exclude)**/.claude/**'
+write "an :(exclude) in the config doesn't unprotect .claude/hooks" .claude/hooks/check.sh 'x' ask ".claude/hooks/check.sh is Claude Code's project settings"
+bash_cmd "an :(exclude) in the config doesn't unprotect .claude/hooks for rm" "rm -rf .claude/hooks" ask
+
+# ---------------------------------------------------------------------------
+# New: ways around the #5 and #6 checks that the first version let through.
+# ---------------------------------------------------------------------------
+
+new_repo
+write "Write to a nested .cargo/mutants.toml asks (the hook's own list)" crates/lib/.cargo/mutants.toml 'x = 1' ask "crates/lib/.cargo/mutants.toml is check config"
+write "Write to .lefthook-local.yaml asks (the hook's own list)" .lefthook-local.yaml 'x = 1' ask ".lefthook-local.yaml is check config"
+printf '[package]\nname = "lib"\n\n[profile.release]\noverflow-checks = true # check\n\n[lints.clippy]\nunwrap_used = "deny"\n' >"${r}/crates/lib/Cargo.toml"
+edit "quoting a lints header into one key asks" crates/lib/Cargo.toml '[lints.clippy]' '["lints.clippy"]' ask "[lints]"
+edit "quoting a profile header into one key asks" crates/lib/Cargo.toml '[profile.release]' '["profile.release"]' ask
+edit "quoting a header's segments separately does not ask" crates/lib/Cargo.toml '[lints.clippy]' '["lints"."clippy"]' silent
+edit "a profile header spelled with an escape asks" crates/lib/Cargo.toml 'name = "lib"' 'name = "lib"
+["profile".dev]
+overflow-checks = false' ask
+edit "changing only a comment beside a profile value does not ask" crates/lib/Cargo.toml '# check' '# keep check' silent
+write "wrapping the lints table in a multi-line string asks" crates/lib/Cargo.toml '[package]
+name = "lib"
+description = """
+
+[lints.clippy]
+unwrap_used = "deny"
+#"""
+[profile.release]
+overflow-checks = true # check
+' ask
+printf '[workspace.lints.rust]\nunexpected_cfgs = { level = "deny", check-cfg = [\n  '"'"'cfg(mode, values("a b"))'"'"',\n] }\n\n[profile.dev]\nrustflags = [\n  "-C", "debug-assertions=no",\n  "-C", "debug-assertions=yes",\n]\n' >"${r}/Cargo.toml"
+edit "a space inside a string in a lints value asks" Cargo.toml 'values("a b")' 'values("ab")' ask
+multi "reordering the lines of a profile array asks" Cargo.toml \
+  '[{"old_string": "  \"-C\", \"debug-assertions=no\",\n  \"-C\", \"debug-assertions=yes\",", "new_string": "  \"-C\", \"debug-assertions=yes\",\n  \"-C\", \"debug-assertions=no\","}]' ask
+
+printf '#![deny(unsafe_code)]\n#![deny(dead_code, reason = "one, two")]\n#[warn(missing_docs)]\npub fn a() {}\n#[test]\n#[should_panic(expected = "[foo] not found")]\nfn t() {}\n' >"${r}/crates/lib/src/m.rs"
+edit "commenting out a #![deny] asks" crates/lib/src/m.rs '#![deny(unsafe_code)]' '// #![deny(unsafe_code)]' ask "#![deny(unsafe_code)]"
+edit "a #![deny] put in a block comment asks" crates/lib/src/m.rs '#![deny(unsafe_code)]' '/* #![deny(unsafe_code)] */' ask
+edit "a #![deny] put in a string asks" crates/lib/src/m.rs '#![deny(unsafe_code)]' 'const _S: &str = "#![deny(unsafe_code)]";' ask
+edit "deny to forbid does not ask" crates/lib/src/m.rs '#![deny(unsafe_code)]' '#![forbid(unsafe_code)]' silent
+edit "warn to deny does not ask" crates/lib/src/m.rs '#[warn(missing_docs)]' '#[deny(missing_docs)]' silent
+edit "deny to warn asks" crates/lib/src/m.rs '#![deny(unsafe_code)]' '#![warn(unsafe_code)]' ask "#![deny(unsafe_code)]"
+edit "changing a reason with commas in it does not ask" crates/lib/src/m.rs 'one, two' 'one, three' silent
+edit "a lint named only in a reason is still removed" crates/lib/src/m.rs '#![deny(unsafe_code)]' '#![deny(missing_docs, reason = ",unsafe_code,")]' ask
+edit "narrowing a should_panic with a ] in its string asks" crates/lib/src/m.rs '"[foo] not found"' '"[foo]"' ask "should_panic"
+
+for i in $(seq 1001); do printf '#[deny(dead_code)]\nfn f%d() {}\n' "${i}"; done >"${r}/crates/lib/src/many.rs"
+edit "a file with over 1000 lint attributes says it wasn't checked for removed ones" crates/lib/src/many.rs 'fn f10()' 'fn g10()' context "over 1000 lint attributes"
+printf 'key = abc # gitleaks:alow\n' >"${r}/app.ini"
+edit "an edit completing a gitleaks:allow without the word gitleaks asks" app.ini 'alow' 'allow' ask "gitleaks:allow"
+
+new_repo
+mkdir -p "${r}/tools/cc" "${r}/empty/.claude"
+ln -s tools/cc "${r}/.claude"
+write "a Write through a symlinked .claude asks" .claude/settings.local.json '{"env": {}}' ask "is Claude Code's project settings"
+edit "an Edit through a symlinked .claude asks" .claude/hooks/x.sh 'a' 'b' ask "is Claude Code's project settings"
+rm -f "${r}/.claude"
+bash_cmd "symlinking a directory in as .claude asks" "mkdir -p tools/cc && ln -s tools/cc .claude" ask ".claude"
+bash_cmd "copying settings into an empty .claude asks" "cp /tmp/settings.json empty/.claude/" ask "empty/.claude"
+bash_cmd "moving settings into an empty .claude asks" "mv /tmp/settings.json empty/.claude" ask
 
 mkdir -p "${work}/tmpdir"
 TMPDIR="${work}/tmpdir" write "a protected Write (for the scratch check)" deny.toml 'x' ask

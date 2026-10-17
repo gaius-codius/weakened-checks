@@ -178,31 +178,40 @@ Differences from the old scripts, all checked against 20 merged PRs of each (`te
 
 ## Claude Code hook
 
-The detector reports a weakened check once a pull request is open. By then an agent stuck on a finding may have silenced it and built on top. `agent/claude-protect-config.sh` is a `PreToolUse` hook that asks you first: before an agent changes check config or adds a suppression, Claude Code shows you the reason and waits for your approval. It reads the same lists and config as the detector, so it serves Rust, Go and TypeScript repositories alike. It needs bash 4.4, git and jq.
+The detector reports a weakened check once a pull request is open. By then an agent stuck on a finding may have silenced it and built on top. `agent/claude-protect-config.sh` is a `PreToolUse` hook that asks you first: before an agent changes check config or adds a suppression, Claude Code shows you the reason and waits for your approval. It reads the same lists and config as the detector, so it serves Rust, Go and TypeScript repositories alike, and asks for a few things CI doesn't report (below). It needs bash 4.4, git and jq.
 
 It replaces rust-ci's `agent/claude-rust-protect-config.sh`. Register one of them, not both, or each change asks twice.
 
 What asks, with paths relative to the root of the git repository the file is in (of the working directory, for a Bash command):
 
-- **Check config.** A path in the `config-path` list, read from `.github/weakened-checks.conf` as committed on the default branch (the first of `origin/HEAD`, `origin/main`, `origin/master`, `main`, `master`), so an uncommitted edit to it can't narrow what it protects. Without a committed config, the built-in list. The config and the exceptions file always ask, by name, also with `disable check-config` or an `:(exclude)` pathspec. A config that doesn't parse protects the built-in list plus every pathspec on its `config-path` lines, and the hook says it didn't parse. A config at another path (the action's `config` input) isn't seen.
-- **`Cargo.toml`**, at any depth, only when the change touches a `[lints]` or `[workspace.lints]` table or a lints key, or when the edit's old text isn't in the file (the hook can't tell).
-- **A suppression added or widened** in a source file. An Edit is applied to the file as it is, and each match runs to the end of its attribute or comment, so `#[allow(dead_code)]` becoming `#[allow(dead_code, unused)]` asks, whichever part of it the edit replaces, and keeping one unchanged doesn't. A symlink is judged by its own name and by the file it points to. The rules are the detector's annotation rules, matched as text rather than on the syntax tree, so a suppression quoted in a string also asks:
+- **Check config.** A path in the `config-path` list, read from `.github/weakened-checks.conf` as committed on the default branch (the first of `origin/HEAD`, `origin/main`, `origin/master`, `main`, `master`), so an uncommitted edit to it can't narrow what it protects. Without a committed config, the built-in list. Wherever the built-in list applies (no `config-path`, `@defaults`, or a config that doesn't parse), so do the hook's own paths: `docs/CODEOWNERS`, `.lefthook.yaml`, `lefthook-local.yml`/`.yaml` (also with a leading dot), `.github/zizmor.yml`/`.yaml`, `.github/actionlint.yml`/`.yaml`, and `.gitattributes` and `build.rs` at any depth. The config and the exceptions file always ask, by name, also with `disable check-config` or an `:(exclude)` pathspec. A config that doesn't parse protects the built-in list plus every pathspec on its `config-path` lines, and the hook says it didn't parse. A config at another path (the action's `config` input) isn't seen.
+- **Claude Code's project settings and hooks**: `.claude/settings.json`, `.claude/settings.local.json` and anything under `.claude/hooks/`, at any depth, always ask, like the config (see "Protecting the hook itself" below).
+- **`Cargo.toml`**, at any depth, only when the change touches the `[lints]`, `[workspace.lints]` or `[profile]` tables, or when the edit's old text isn't in the file (the hook can't tell). Each value is compared by its full dotted path, so the table a key sits under counts and its spelling doesn't: a dotted `lints.*` key moved under another table asks, and `clippy.unwrap_used = "deny"` under `[workspace.lints]` in place of `unwrap_used = "deny"` under `[workspace.lints.clippy]` doesn't. A quoted key holding a dot is one key (`["lints.clippy"]` is not the lints table), and a value's comment and spacing outside its strings don't count. An inline table (`clippy = { unwrap_used = "deny" }`) is compared as written, so rewriting one as a table asks.
+- **A suppression added or widened** in a source file. An Edit is applied to the file as it is, and each match runs to the end of its attribute or comment, so `#[allow(dead_code)]` becoming `#[allow(dead_code, unused)]` asks, whichever part of it the edit replaces, and keeping one unchanged doesn't. Rust attributes are compared without their whitespace, so respacing one doesn't ask. A symlink is judged by its own name and by the file it points to. The rules are the detector's annotation rules, matched as text rather than on the syntax tree, so a suppression quoted in a string also asks:
 
   | Files | Suppressions |
   |---|---|
-  | `.rs` | `#[allow(..)]`, `#[expect(..)]` (also in `cfg_attr`), `#[ignore]`, `#[rustfmt::skip]`, `#[cfg(any())]` / `#[cfg(not(all()))]` / `#[cfg(false)]` |
+  | `.rs` | `#[allow(..)]`, `#[expect(..)]` (also in `cfg_attr`), `#[ignore]`, `#[should_panic]`, `#[rustfmt::skip]`, `#[cfg(any())]` / `#[cfg(not(all()))]` / `#[cfg(false)]` / `#[cfg(miri)]` |
   | `.go` | `//nolint`; `t.Skip`, `Skipf`, `SkipNow` in `_test.go` files |
   | `.ts`, `.tsx`, `.js` and the like | `@ts-nocheck`, `@ts-ignore`, `@ts-expect-error` without a reason, `eslint-disable`, `biome-ignore`, `it.skip`, `test.only`, `xit` and the like |
   | `.svelte` | the TS/JS ones, and `svelte-ignore` |
   | `.py` | `@pytest.mark.skip`/`skipif`/`xfail`, `@unittest.skip*`, `pytest.skip()`, `self.skipTest()` |
   | all of these, `.sh`, `.bash` | `nosemgrep` |
+  | any file | `gitleaks:allow` |
 
-  A rule the config disables doesn't ask. `x as unknown as T` outside the test paths doesn't ask: it tells the agent that the detector will report it. Where the config prohibits `ts-as-unknown` and the exceptions file (read from `HEAD`) doesn't allow it, it asks.
-- **Bash, best effort.** A command that names a protected path, or a directory holding one, and writes with `sed -i`, `perl -i`, `tee`, `mv`, `cp`, `rm`, `truncate`, `ln`, `install`, `patch`, `dd` or `git checkout`/`restore`/`rm`/`mv`/`apply`, or redirects into one (`>`, `>>`, `>|`); paths are resolved against the working directory, so a `cd` earlier in the command, or a path held in a variable, isn't followed. `cp` from a protected file asks too. a `Cargo.toml` together with `lints`; a source file together with one of its suppressions. A write through any other program (a script, an editor) isn't seen.
+  A rule the config disables doesn't ask: `#[should_panic]` goes with `rust-ignore`, and `#[cfg(miri)]` with the other disabling cfgs, which no rule turns off. `gitleaks:allow` has no rule, so nothing turns it off. `x as unknown as T` outside the test paths doesn't ask: it tells the agent that the detector will report it. Where the config prohibits `ts-as-unknown` and the exceptions file (read from `HEAD`) doesn't allow it, it asks.
+- **A Rust lint attribute removed or narrowed**: a `#![deny(..)]`, `#![forbid(..)]` or `#[warn(..)]`, or a `cfg_attr` applying one, that the file loses, or a lint dropped from its list, since a crate's `#![deny]` is a check too. Each level and lint is compared as a pair, so moving or respacing one doesn't ask, and adding a lint to the list doesn't either. Raising a level (`warn` to `deny`, `deny` to `forbid`) doesn't ask. Commenting one out or moving it into a string counts as removing it. A file with over 1000 of them isn't checked for removed ones (the hook would outlive its timeout), and the hook says so. `disable rust-allow` turns it off.
+- **Bash, best effort.** A command that names a protected path, or a directory holding one, and writes with `sed -i`, `perl -i`, `tee`, `mv`, `cp`, `rm`, `truncate`, `ln`, `install`, `patch`, `dd` or `git checkout`/`restore`/`rm`/`mv`/`apply`, or redirects into one (`>`, `>>`, `>|`); paths are resolved against the working directory, so a `cd` earlier in the command, or a path held in a variable, isn't followed. `cp` from a protected file asks too. Also: any write to a `Cargo.toml` (from a command line there's no telling which table it lands in; a `--manifest-path` argument doesn't count); a source file together with one of its suppressions, spaced or sed-escaped (`#[ allow(`, `#\[allow(`); a `.rs` file together with `deny` or `forbid`; `gitleaks:allow` in a command that writes. A write through any other program (a script, an editor) isn't seen.
 
 What CI reports and the hook doesn't: tagged bounds, removed tests, snapshots, workspace-lints inheritance, `unsafe` and `no_mangle`. A rule the config prohibits among those still fails in CI.
 
-Outcomes: `permissionDecision: "ask"` with the reason for a protected change; nothing otherwise, and nothing outside a git repository; `additionalContext` for an advisory note or when the check can't run (jq or git missing or failing, input jq can't read, `lib/` missing, an older bash). It never blocks. `WEAKENED_CHECKS_PROTECT_CONFIG=off` turns it off: in the environment Claude Code starts in, for every project, or under `env` in a project's `.claude/settings.local.json`, for that project.
+What the hook asks for and CI doesn't report: its own paths above, `[profile]` tables, `#[should_panic]`, `#[cfg(miri)]`, removed or narrowed lint attributes, `gitleaks:allow`, and Claude Code's settings and hooks. A pull request with them passes CI as before.
+
+Outcomes: `permissionDecision: "ask"` with the reason for a protected change; nothing otherwise, and nothing outside a git repository; `additionalContext` for an advisory note or when the check can't run (jq or git missing or failing, input jq can't read, `lib/` missing, an older bash). It never blocks. `WEAKENED_CHECKS_PROTECT_CONFIG=off` turns it off: in the environment Claude Code starts in, for every project, or under `env` in a project's `.claude/settings.local.json`, for that project. An agent's edit to that file asks, so you make that change yourself or approve it.
+
+### Protecting the hook itself
+
+A project's `.claude/settings.json` and `.claude/settings.local.json` can turn the hook off: `WEAKENED_CHECKS_PROTECT_CONFIG=off` (or rust-ci's `RUST_CI_PROTECT_CONFIG=off`, or a `WEAKENED_CHECKS_HOOK` pointing elsewhere) under `env`, `disableAllHooks`, or a changed `hooks` entry. A script under `.claude/hooks/` can be the hook a project registers. Checked with Claude Code 2.1.299: an agent's Write of an `env` setting to `.claude/settings.local.json` reached the hooks, and the Bash tool, on the next tool call of the same session. So these files always ask, at any depth (Claude Code reads them from the directory it starts in, which in a monorepo needn't be the repository root), and neither the config nor `disable check-config` can take them out. A Bash command that writes to a `.claude` directory itself (a symlink or a copy put in its place) asks. So does one naming a directory that holds them: directly inside it even when they're gitignored, deeper down unless they're gitignored. They aren't in the detector's built-in list: they don't define what CI checks, and reporting them on pull requests would be noise. Settings outside the repository (`~/.claude/settings.json`, managed settings) aren't seen.
 
 Install once per machine, from a clone of this repository (the hook finds `lib/` through its symlink, so keep the clone):
 
@@ -222,7 +231,15 @@ and register it in `~/.claude/settings.json`, under `hooks.PreToolUse`:
 }
 ```
 
-Differences from rust-ci's hook, besides the languages: it judges every git repository, not only those with a root `Cargo.toml`, and `docs/CODEOWNERS` and `.lefthook.yaml` don't ask, since the detector's built-in list doesn't have them.
+Differences from rust-ci v3's own rules (its `agent/rust-protect-remainder.sh`), besides the languages:
+
+- It judges every git repository, not only those with a root `Cargo.toml`.
+- It reads `Cargo.toml` without Python. Where rust-ci has no `tomllib` (Python before 3.11), its line heuristic asks for any new table header. This hook asks only when the lints or `[profile]` values change, which is what rust-ci does with `tomllib`.
+- It protects Claude Code's project settings and hooks, which rust-ci's rules don't.
+- Respacing an `#[allow]`, or writing a lints table another way with the same lints (other than as an inline table), doesn't ask in either.
+- Raising a lint attribute's level, or changing a `reason` with a comma in it, doesn't ask here. Commenting a lint attribute out does.
+
+`docs/CODEOWNERS` and `.lefthook.yaml` move from the hook's own list to the built-in list in the next major version (#4).
 
 ## Changing weakened-checks
 
@@ -230,7 +247,7 @@ CI (`ci.yml`) runs these checks:
 
 - `tests/test-rules.sh`: the rules load, each rule id is one the detector knows, and the TypeScript rules' two copies match.
 - `tests/test-detector.sh`: every rule, the config, prohibitions and exceptions, and one case for each gap the old scripts had (GAI-359, GAI-379, GAI-413, GAI-422, GAI-480), each as the diff it should catch.
-- `tests/test-protect-hook.sh`: the Claude Code hook, with every case of rust-ci's hook test ported (the differences above are marked) and cases for Go, TypeScript, Svelte, Python, a repository with a config and one without.
+- `tests/test-protect-hook.sh`: the Claude Code hook, with every case of rust-ci's hook test ported (the differences above are marked) and cases for Go, TypeScript, Svelte, Python, a repository with a config and one without, and Claude Code's settings.
 - `tests/run-ported.sh`: nota's and conspector's suites, unchanged. nota's suite runs against a fetch of nota at the commit it was taken from.
 - shellcheck and actionlint.
 - The `actions` job runs `action.yml` against fixture repositories. It checks that an explained advisory finding passes, an unexplained one fails, and a prohibited one fails even when explained.
@@ -241,7 +258,7 @@ When nota's or conspector's suite changes, refresh the copy with `tests/ported/e
 
 To bump ast-grep, set `version` and the four SHA-256s in `scripts/install-ast-grep.sh` (the release's asset digests: `gh api repos/ast-grep/ast-grep/releases/tags/<v> --jq '.assets[] | "\(.name) \(.digest)"'`), and the pin in `mise.toml`. Grammar changes can change what the rules match, so a bump is its own pull request.
 
-A change that would fail a project that passed before is a new major version: a new rule on by default, a wider built-in list, or a new required input. A new rule that is off by default isn't.
+A change that would fail a project that passed before is a new major version: a new rule on by default, a wider built-in list, or a new required input. A new rule that is off by default isn't, and nor is the hook asking for more (its own paths, a new pattern), since CI's results don't change.
 
 ### Releasing
 
