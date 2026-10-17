@@ -24,6 +24,15 @@ done
 nojq="${work}/nojq"
 nogit="${work}/nogit"
 
+# The hook's shell parser is POSIX awk (CI's is mawk). Where awk is gawk, it
+# runs in POSIX mode here, so a gawk-only construct fails here first.
+if awk --version 2>/dev/null | grep -q 'GNU Awk'; then
+  mkdir -p "${work}/posixawk"
+  printf '#!/bin/sh\nexec %s --posix "$@"\n' "$(command -v gawk)" >"${work}/posixawk/awk"
+  chmod +x "${work}/posixawk/awk"
+  PATH="${work}/posixawk:${PATH}"
+fi
+
 failures=0
 total=0
 unset WEAKENED_CHECKS_PROTECT_CONFIG
@@ -115,6 +124,8 @@ new_repo
 #   b. The no-jq PATH also needs mktemp, rm and tr (see the top of the file).
 #   c. Any Bash write to a Cargo.toml asks, as in rust-ci v3's hook, so
 #      "sed -i on Cargo.toml dependencies" now asks.
+#   d. Bash commands are parsed, and only what they write is judged (#8), so
+#      cp from a protected file no longer asks.
 # The reason texts differ too: "<path> is check config", "adds or widens a lint
 # or test suppression", and so on.
 # ---------------------------------------------------------------------------
@@ -734,6 +745,111 @@ rm -f "${r}/.claude"
 bash_cmd "symlinking a directory in as .claude asks" "mkdir -p tools/cc && ln -s tools/cc .claude" ask ".claude"
 bash_cmd "copying settings into an empty .claude asks" "cp /tmp/settings.json empty/.claude/" ask "empty/.claude"
 bash_cmd "moving settings into an empty .claude asks" "mv /tmp/settings.json empty/.claude" ask
+
+# ---------------------------------------------------------------------------
+# New: a Bash command is parsed, and only the files it writes are judged (#8).
+# ---------------------------------------------------------------------------
+
+new_repo
+mkdir -p "${r}/app" "${r}/scripts" "${r}/empty"
+printf '{}\n' >"${r}/app/tsconfig.json"
+printf 'export {}\n' >"${r}/scripts/check-biome-strict.mjs"
+printf 'name: test\n' >"${r}/.github/workflows/test.yml"
+commit_all "#8 fixtures"
+
+# The reported false positives.
+bash_cmd "#8: jq --arg with JSON naming a workflow is silent" \
+  "jq -n --arg f .github/workflows/ci.yml '{tool_name: \"Edit\", tool_input: {file_path: \$f}}' | agent/claude-protect-config.sh" silent
+bash_cmd "#8: a quoted sed -i fixture passed to a function is silent" \
+  "run Bash '{\"command\":\"sed -i s/a/b/ .github/workflows/ci.yml\"}' ask" silent
+bash_cmd "#8: read-only grep and sed -n on a protected script are silent" \
+  'grep -n biome .github/workflows/test.yml | head; sed -n 1,80p scripts/check-biome-strict.mjs; grep -n "^export" scripts/check-biome-strict.mjs; biome check --reporter=json src/some.js; echo rc=$?' silent
+bash_cmd "#8: cd into a directory holding check config is silent" \
+  "cd app && npx svelte-kit sync; vitest related --run src/lib/a.ts" silent
+review=$'cat > /tmp/review.md <<\'EOF\'\nThe hook asks for .gitleaks.toml, CODEOWNERS, build.rs and .gitattributes.\nrm -rf .github; cp x deny.toml; sed -i s/a/b/ .github/workflows/ci.yml\nEOF\ngit worktree remove ../wt-8 && git fetch origin && git push -u origin wc-8'
+bash_cmd "#8: a push after a review heredoc naming protected files is silent" "${review}" silent
+bash_cmd "#8: a review heredoc fed to gh --body-file - is silent" \
+  $'gh pr comment 12 --body-file - <<\'EOF\'\nsed -i s/a/b/ deny.toml > .github/workflows/ci.yml\nEOF\ngit push' silent
+bash_cmd "#8: a stray . with rm of another file is silent" "ls . && rm -f /tmp/x.log" silent
+bash_cmd "#8: git checkout of a branch is silent" "git checkout -b wc-8 && git status ." silent
+bash_cmd "#8: cp from a protected file is silent" "cp .github/workflows/ci.yml /tmp/ci.yml" silent
+bash_cmd "#8: cp into the root is silent" "cp /tmp/notes.txt ." silent
+bash_cmd "#8: a quoted path in echo is silent" "echo 'edit deny.toml next' > /tmp/plan.txt" silent
+bash_cmd "#8: sed -n is not sed -i" "sed -n 's/a/b/p' deny.toml" silent
+bash_cmd "#8: find -delete with a filter that matches nothing protected is silent" "find . -name '*.orig' -delete" silent
+bash_cmd "#8: a here-string to a reader is silent" "grep -c x <<< 'rm -rf .github'" silent
+# shellcheck disable=SC2016 # the command text is meant literally.
+bash_cmd "#8: arithmetic and parameter expansion parse" 'echo $((1 + 2)) ${x:-"a b"} ${#arr[@]} a#b $'"'"'q\x27'"'"'; (( i++ ))' silent
+# shellcheck disable=SC2016 # the command text is meant literally.
+bash_cmd "#8: a case pattern parses" 'case $x in a) echo deny.toml;; esac' silent
+
+# Real writes the parser must still see.
+bash_cmd "#8: a quoted path for sed -i asks" "sed -i 's/a/b/' \".github/workflows/ci.yml\"" ask "ci.yml"
+bash_cmd "#8: sed -n -i asks" "sed -n -i 's/a/b/p' deny.toml" ask
+bash_cmd "#8: sed --in-place asks" "sed --in-place=.bak 's/a/b/' deny.toml" ask
+bash_cmd "#8: sed -ie asks" "sed -ie 's/a/b/' deny.toml" ask
+bash_cmd "#8: BSD sed -i '' asks" "sed -i '' 's/a/b/' deny.toml" ask
+bash_cmd "#8: perl -0777 -pi asks" "perl -0777 -pi -e 's/a/b/' deny.toml" ask
+bash_cmd "#8: gsed -i asks" "gsed -i 's/a/b/' deny.toml" ask
+bash_cmd "#8: sponge asks" "jq . deny.toml | sponge deny.toml" ask
+bash_cmd "#8: bash -c asks" "bash -c 'sed -i s/a/b/ deny.toml'" ask
+bash_cmd "#8: bash -lc asks" "bash -lc 'sed -i s/a/b/ deny.toml'" ask
+bash_cmd "#8: eval asks" "eval 'echo x > deny.toml'" ask
+bash_cmd "#8: a heredoc fed to bash asks" $'bash <<\'EOF\'\nsed -i s/a/b/ deny.toml\nEOF' ask
+bash_cmd "#8: a heredoc piped to sh asks" $'cat <<\'EOF\' | sh\nrm -f deny.toml\nEOF' ask
+bash_cmd "#8: echo piped to sh asks" "echo 'rm -f deny.toml' | sh" ask
+bash_cmd "#8: sudo tee asks" "echo x | sudo -u root tee .github/workflows/ci.yml" ask
+bash_cmd "#8: env with assignments asks" "env -u HOME LC_ALL=C sed -i s/a/b/ deny.toml" ask
+bash_cmd "#8: env -S asks" "env -S 'sed -i s/a/b/ deny.toml'" ask
+bash_cmd "#8: timeout asks" "timeout -s KILL 10 rm -f deny.toml" ask
+# shellcheck disable=SC2016 # the command text is meant literally.
+bash_cmd "#8: a write in a command substitution asks" 'echo $(sed -i s/a/b/ deny.toml)' ask
+# shellcheck disable=SC2016 # the command text is meant literally.
+bash_cmd "#8: a write in a command substitution in quotes asks" 'echo "$(sed -i s/a/b/ deny.toml)"' ask
+# shellcheck disable=SC2016 # the command text is meant literally.
+bash_cmd "#8: a write in backticks asks" 'echo `rm -f deny.toml`' ask
+bash_cmd "#8: a write in a heredoc that expands asks" $'cat > /tmp/x <<EOF\n$(rm -f deny.toml)\nEOF' ask
+bash_cmd "#8: a write after a variable assignment asks" "X=1 sed -i s/a/b/ deny.toml" ask
+bash_cmd "#8: a write after then asks" "if true; then rm -f deny.toml; fi" ask
+# shellcheck disable=SC2016 # the command text is meant literally.
+bash_cmd "#8: a write after a case pattern asks" 'case $x in a) sed -i s/a/b/ deny.toml;; esac' ask
+bash_cmd "#8: a write in a subshell asks" "(cd /tmp && true; rm -f '${r}/deny.toml')" ask
+bash_cmd "#8: a redirect after a loop asks" "for x in a b; do echo \$x; done > .github/workflows/ci.yml" ask
+bash_cmd "#8: a redirect after a group asks" "{ echo a; echo b; } > deny.toml" ask
+bash_cmd "#8: a redirect after a subshell asks" "(echo '[profile.dev]') >> Cargo.toml" ask "a Cargo.toml"
+bash_cmd "#8: a redirect first asks" ": > deny.toml" ask
+bash_cmd "#8: >& a file asks" "echo x >& deny.toml" ask
+bash_cmd "#8: &> a file asks" "echo x &> deny.toml" ask
+bash_cmd "#8: <> a file asks" "exec 3<> deny.toml" ask
+bash_cmd "#8: a quoted heredoc into a protected file asks" $'cat <<\'EOF\' > deny.toml\n[bans]\nEOF' ask
+bash_cmd "#8: a heredoc diff fed to patch asks" $'patch -p1 <<\'EOF\'\n--- a/deny.toml\n+++ b/deny.toml\n@@ -1 +1 @@\n-[bans]\n+[x]\nEOF' ask
+bash_cmd "#8: git apply of a heredoc diff asks" $'git apply <<\'EOF\'\n--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\nEOF' ask
+# shellcheck disable=SC2016 # the command text is meant literally.
+bash_cmd "#8: a for loop over workflows with sed -i asks" 'for f in .github/workflows/*.yml; do sed -i "s/a/b/" "$f"; done' ask
+# shellcheck disable=SC2016 # the command text is meant literally.
+bash_cmd "#8: a target held in a variable asks" 'f=deny.toml; sed -i s/a/b/ "$f"' ask
+# shellcheck disable=SC2016 # the command text is meant literally.
+bash_cmd "#8: a redirect to a variable asks" 'out=deny.toml; echo x > $out' ask
+# shellcheck disable=SC2016 # the command text is meant literally.
+bash_cmd "#8: sed -i on a command's output asks" 'sed -i s/a/b/ $(grep -l name .github/workflows/*.yml)' ask
+bash_cmd "#8: xargs rm asks" "git ls-files .github | xargs rm -f" ask
+bash_cmd "#8: find -exec sed -i asks" "find .github -name '*.yml' -exec sed -i s/a/b/ {} +" ask
+bash_cmd "#8: find -delete of the tree asks" "find . -delete" ask "the whole repository"
+bash_cmd "#8: find -name matching a protected file asks" "find . -name 'deny.toml' -delete" ask "deny.toml"
+bash_cmd "#8: find -exec writing a suppression into .rs files asks" "find . -name '*.rs' -exec sed -i 's/^fn/#[allow(dead_code)]\\nfn/' {} +" ask "suppression"
+bash_cmd "#8: cd then a relative write asks" "cd .github/workflows && sed -i s/a/b/ ci.yml" ask "ci.yml"
+bash_cmd "#8: git -C then a relative path asks" "git -C .github checkout -- workflows/ci.yml" ask "ci.yml"
+bash_cmd "#8: cp into the root of a protected name asks" "cp /tmp/deny.toml ." ask "deny.toml"
+bash_cmd "#8: cp -t into a protected directory asks" "cp -t .github/workflows /tmp/new.yml" ask
+bash_cmd "#8: ln with one argument asks" "ln -s /tmp/deny.toml" ask "deny.toml"
+bash_cmd "#8: a suppression written to /tmp and moved in asks" \
+  $'cat > /tmp/new.rs <<\'EOF\'\n#[allow(dead_code)]\nfn x() {}\nEOF\nmv /tmp/new.rs crates/lib/src/lib.rs' ask "suppression"
+bash_cmd "#8: gitleaks:allow written to /tmp and copied in asks" \
+  "echo 'k = a # gitleaks:allow' > /tmp/a.ini && cp /tmp/a.ini config.ini" ask "gitleaks:allow"
+bash_cmd "#8: gitleaks:allow written outside the repository is silent" "echo 'k = a # gitleaks:allow' > /tmp/a.ini" silent
+bash_cmd "#8: git restore --staged . still asks" "git restore --staged ." ask "the whole repository"
+bash_cmd "#8: rm -rf app asks for its check config" "rm -rf app" ask "app"
+bash_cmd "#8: an unterminated quote falls back to all the words" $'sed -i s/a/b/ deny.toml\necho \'oops' ask "could not be parsed"
 
 mkdir -p "${work}/tmpdir"
 TMPDIR="${work}/tmpdir" write "a protected Write (for the scratch check)" deny.toml 'x' ask
