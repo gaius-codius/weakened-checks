@@ -1,0 +1,91 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v[0-9]*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned ast-grep
+        run: echo "AST_GREP=$(scripts/install-ast-grep.sh)" >>"$GITHUB_ENV"
+
+      - name: Test the rules
+        run: tests/test-rules.sh
+
+      - name: Test the detector
+        run: tests/test-detector.sh
+
+      - name: Run the suite ported from nota
+        run: tests/run-ported.sh
+
+      - name: Shellcheck
+        run: shellcheck -x check-weakened.sh lib/*.bash scripts/*.sh tests/*.sh tests/ported/extract.sh
+
+      - name: Actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
+
+  actions:
+    # The composite action at this commit, against fixture repositories: an
+    # explained advisory finding passes, an unexplained one fails, and a
+    # prohibited one fails even when explained.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the fixtures
+        id: fixture
+        run: tests/action-fixture.sh .fixture >>"$GITHUB_OUTPUT"
+
+      - name: Explained advisory finding
+        uses: ./
+        with:
+          working-directory: .fixture
+          base: ${{ steps.fixture.outputs.base }}
+          head: ${{ steps.fixture.outputs.advisory }}
+          pr-body: "Check changes: the fixture allows a lint."
+
+      - name: Unexplained advisory finding
+        id: unexplained
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: .fixture
+          base: ${{ steps.fixture.outputs.base }}
+          head: ${{ steps.fixture.outputs.advisory }}
+          pr-body: Adds a thing.
+
+      - name: Prohibited finding, explained
+        id: prohibited
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: .fixture
+          base: ${{ steps.fixture.outputs.base }}
+          head: ${{ steps.fixture.outputs.prohibited }}
+          pr-body: "Check changes: the fixture turns type checking off."
+
+      - name: The failing cases failed
+        env:
+          UNEXPLAINED: ${{ steps.unexplained.outcome }}
+          PROHIBITED: ${{ steps.prohibited.outcome }}
+        run: |
+          test "$UNEXPLAINED" = failure
+          test "$PROHIBITED" = failure

@@ -1,0 +1,14 @@
+# ast-grep project config for check-weakened.sh. The detector runs
+# `ast-grep scan -c rules/sgconfig.yml` over the branch's copies of the files
+# it changed, then keeps the matches that touch an added line.
+ruleDirs:
+  - rust
+  - go
+  - ts
+  - python
+  - any
+# JavaScript is parsed with the TSX grammar (a superset of it), so each
+# TypeScript rule is written twice: once for typescript, once for tsx.
+languageGlobs:
+  tsx: ['*.tsx', '*.js', '*.jsx', '*.mjs', '*.cjs']
+  typescript: ['*.ts', '*.mts', '*.cts']

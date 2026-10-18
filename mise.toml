@@ -1,0 +1,8 @@
+# Pinned tools for local work on this repository. Run `mise install` after
+# cloning. ast-grep here must match scripts/install-ast-grep.sh, which CI and
+# the action use; without mise, the detector fetches that version itself.
+[tools]
+"aqua:ast-grep/ast-grep" = "0.45.3"
+shellcheck = "0.11.0"
+actionlint = "1.7.12"
+jq = "1.8.2"

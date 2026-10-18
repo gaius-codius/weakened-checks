@@ -1,0 +1,23 @@
+# This repository's own pull requests, through the action at the PR's commit.
+# Separate from ci.yml so editing a PR's body re-runs only this. Editing a
+# closed PR's text runs nothing.
+name: rules
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  weakened:
+    name: Weakened checks are explained
+    if: github.event.pull_request.state == 'open'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./

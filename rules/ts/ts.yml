@@ -1,0 +1,131 @@
+# TypeScript and JavaScript: type checking or linting turned off, a type
+# forced through `unknown`, and tests skipped or narrowed with .only. The
+# detector reports ts-as-unknown only outside the test paths. Each rule is
+# written for typescript and for tsx (which also parses JavaScript);
+# tests/test-rules.sh checks the two copies match. A rule id is unique per
+# language in ast-grep, so each carries @language; the detector drops it.
+id: ts-nocheck@typescript
+language: typescript
+severity: warning
+message: type checking is off for the file
+rule:
+  kind: comment
+  regex: '@ts-nocheck\b'
+---
+id: ts-ignore@typescript
+language: typescript
+severity: warning
+message: a type error is ignored
+rule:
+  kind: comment
+  regex: '@ts-ignore\b'
+---
+# A reason is any text after the directive, which TypeScript keeps as the
+# comment's description: "// @ts-expect-error: why" or "-- why".
+id: ts-expect-error@typescript
+language: typescript
+severity: warning
+message: a type error is expected without a reason
+rule:
+  kind: comment
+  regex: '@ts-expect-error[\s:-]*(\*/\s*)?$'
+---
+id: ts-as-unknown@typescript
+language: typescript
+severity: warning
+message: a type is forced through unknown
+rule:
+  pattern: $X as unknown as $T
+---
+id: eslint-disable@typescript
+language: typescript
+severity: warning
+message: an ESLint rule is disabled
+rule:
+  kind: comment
+  regex: '\beslint-disable'
+---
+id: biome-ignore@typescript
+language: typescript
+severity: warning
+message: a Biome rule is ignored
+rule:
+  kind: comment
+  regex: '\bbiome-ignore'
+---
+id: js-test-skip@typescript
+language: typescript
+severity: warning
+message: a test is skipped, or others are skipped by .only
+rule:
+  kind: call_expression
+  has:
+    field: function
+    any:
+      - kind: member_expression
+        regex: '^(it|test|describe|suite|bench)(\.(concurrent|sequential))?\.(skip|only|todo|skipIf|runIf)\b'
+      - kind: identifier
+        regex: '^x(it|test|describe)$'
+---
+id: ts-nocheck@tsx
+language: tsx
+severity: warning
+message: type checking is off for the file
+rule:
+  kind: comment
+  regex: '@ts-nocheck\b'
+---
+id: ts-ignore@tsx
+language: tsx
+severity: warning
+message: a type error is ignored
+rule:
+  kind: comment
+  regex: '@ts-ignore\b'
+---
+# A reason is any text after the directive, which TypeScript keeps as the
+# comment's description: "// @ts-expect-error: why" or "-- why".
+id: ts-expect-error@tsx
+language: tsx
+severity: warning
+message: a type error is expected without a reason
+rule:
+  kind: comment
+  regex: '@ts-expect-error[\s:-]*(\*/\s*)?$'
+---
+id: ts-as-unknown@tsx
+language: tsx
+severity: warning
+message: a type is forced through unknown
+rule:
+  pattern: $X as unknown as $T
+---
+id: eslint-disable@tsx
+language: tsx
+severity: warning
+message: an ESLint rule is disabled
+rule:
+  kind: comment
+  regex: '\beslint-disable'
+---
+id: biome-ignore@tsx
+language: tsx
+severity: warning
+message: a Biome rule is ignored
+rule:
+  kind: comment
+  regex: '\bbiome-ignore'
+---
+id: js-test-skip@tsx
+language: tsx
+severity: warning
+message: a test is skipped, or others are skipped by .only
+rule:
+  kind: call_expression
+  has:
+    field: function
+    any:
+      - kind: member_expression
+        regex: '^(it|test|describe|suite|bench)(\.(concurrent|sequential))?\.(skip|only|todo|skipIf|runIf)\b'
+      - kind: identifier
+        regex: '^x(it|test|describe)$'
