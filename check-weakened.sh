@@ -192,7 +192,9 @@ if on check-config; then
   [[ -n $cfg_in_repo ]] && paths+=(":(literal)$cfg_in_repo")
   [[ $exceptions_path != none ]] && paths+=(":(literal)$exceptions_path")
   if [[ ${#paths[@]} -gt 0 ]]; then
-    gitq diff --name-only "$mb" "$head" -- "${paths[@]}" >"$tmp/config-changed" ||
+    # Without rename detection, so a file moved between config paths is
+    # reported at both, and a prohibition can't be left by moving it.
+    gitq diff --name-only --no-renames "$mb" "$head" -- "${paths[@]}" >"$tmp/config-changed" ||
       die "git diff failed on the check-config paths"
     while IFS= read -r f; do
       [[ -n $f ]] && finding check-config "$f" "check config changed: $f"

@@ -292,6 +292,11 @@ put crates/b/Cargo.toml '[package]\nname = "a"\nversion = "0.1.0"\nedition = "20
 run || true
 has "a crate moved without the workspace lints" '  - crate does not inherit the workspace lints: crates/b/Cargo.toml'
 
+fresh; on_main .github/workflows/ci.yml 'a\nb\nc\nd\n'; on_main .github/weakened-checks.conf 'prohibit check-config .github/workflows/*\n'
+mkdir -p .husky && git mv .github/workflows/ci.yml .husky/ci.yml; commit
+expect fail "a workflow moved out of a prohibited path into another config path" "$explained"
+has "a workflow moved out of a prohibited path into another config path" '  - check config changed: .github/workflows/ci.yml'
+
 # Bracket segments in shell patterns match their own text.
 fresh; on_main .github/weakened-checks.conf 'prohibit ts-nocheck routes/*\n'
 put 'routes/orders/[id]/edit/x.ts' '// @ts-nocheck\n'

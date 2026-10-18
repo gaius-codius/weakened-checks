@@ -78,7 +78,7 @@ The detector compares `HEAD` with its merge base with `BASE` (`git diff BASE...H
 
 | Rule | Engine | Reported when the branch... |
 |---|---|---|
-| `check-config` | path | changes a check-config path (the list is below), this config, or the exceptions file |
+| `check-config` | path | changes a check-config path (the list is below), this config, or the exceptions file. A file moved between check-config paths is reported at both. |
 | `cargo-lint-levels` | diff | edits a lint table or a lint level in any `Cargo.toml`. Adding `[lints]` / `workspace = true` doesn't count. |
 | `cargo-workspace-lints` | path | adds, changes or moves a member `Cargo.toml` (`cargo-members`) that doesn't inherit `[workspace.lints]`, in a workspace that has some |
 | `check-bound` | diff | changes, deletes or untags a line tagged `check-bound` (below) |
