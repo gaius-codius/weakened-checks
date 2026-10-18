@@ -38,7 +38,7 @@ git -C "$work/repo.git" fetch -q "https://github.com/$repo" \
   $(jq -r '.[].baseRefOid' "$work/prs.json" | sort -u) 2>/dev/null || true
 
 findings() { # output file; prints its findings, normalised, one per line
-  sed -n 's/^  - //p' "$1" |
+  sed -n '/^Config errors/q; s/^  - //p' "$1" |
     sed -E 's/^added: [^:]+:[0-9]+: (.*) \[[a-z-]+\]$/added: \1/;
       s/^(lint levels changed in a Cargo.toml): .*/\1/' |
     LC_ALL=C sort -u

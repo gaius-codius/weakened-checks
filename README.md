@@ -83,7 +83,7 @@ The detector compares `HEAD` with its merge base with `BASE` (`git diff BASE...H
 | `cargo-workspace-lints` | path | adds, changes or moves a member `Cargo.toml` (`cargo-members`) that doesn't inherit `[workspace.lints]`, in a workspace that has some |
 | `check-bound` | diff | changes, deletes or untags a line tagged `check-bound` (below) |
 | `tests-removed` | diff | deletes more tests than it adds: Rust `#[test]`/`#[proptest]`/`#[rstest]` in any file; Go `func Test`/`Fuzz` in `_test.go`; JS/TS `it(`/`test(` and Python `def test` in test paths. Counted over the whole diff, so moving a test isn't reported. A renamed file's tests count as leaving its old path, so renaming a test file out of the test paths is reported. |
-| `snapshot` | path | modifies, deletes, or renames and modifies a snapshot or golden file (`snapshot-path`) |
+| `snapshot` | path | modifies, deletes, or renames and modifies a snapshot or golden file (`snapshot-path`). A renamed one is prohibited where either its old or its new path is, and moving one unchanged out of a prohibited path is reported too. |
 | `rust-allow` | ast-grep | adds `#[allow(..)]`/`#[expect(..)]`, outer or inner, including inside `cfg_attr` and across lines |
 | `rust-ignore` | ast-grep | adds `#[ignore]`, also with a reason or under `cfg_attr` |
 | `rust-rustfmt-skip` | ast-grep | adds `#[rustfmt::skip]` |
@@ -122,7 +122,7 @@ A **prohibited** finding fails whatever the PR body says. The only way to allow 
 
 `.github/weakened-checks.conf` (or the `config` input / `--config`) holds one directive per line. `#` starts a comment, and blank lines are ignored. An unknown directive or rule id is an error, so a typo can't quietly turn a check off. The config is read from `BASE`, so a branch can't relax the rules it is checked against. A branch that adds the first config is checked with that config, read from `HEAD`.
 
-A `config-path`, `snapshot-path` or `cargo-members` entry that git rejects as a pathspec (`:(bogus)x`, say) is a config error too. The detector reports the findings the other entries match, then the rejected entries, and exits 2. A branch that changes the config is also held to its own version: an error there fails the branch, so a broken config can't reach `BASE`. If `BASE`'s config already has errors and the branch's config has none, the branch that fixes it passes, and the errors are only reported.
+A `config-path`, `snapshot-path` or `cargo-members` entry that git rejects as a pathspec (`:(bogus)x`, say), or an `exceptions` path outside the repository, is a config error too. The detector reports the findings the other entries match, then the rejected entries, and exits 2. A branch that changes the config is also held to its own version: an error there fails the branch, so a broken config can't reach `BASE`. If `BASE`'s config already has errors and the branch's config has none, the branch that fixes it passes, and the errors are only reported.
 
 | Directive | Meaning |
 |---|---|
@@ -135,7 +135,7 @@ A `config-path`, `snapshot-path` or `cargo-members` entry that git rejects as a 
 | `disable RULE...` | Turns rules off |
 | `prohibit RULE PATTERN...` | Makes the rule's findings in matching paths prohibited (shell patterns where `*` also matches `/`). For `tests-removed`, the tests deleted and added in the files that match each pattern are counted together, so moving a test within the pattern is allowed, and renaming a test file out of it isn't. |
 
-In the shell patterns (`test-path`, `prohibit` and the exceptions file), a bracket expression matches either its own text or, as in bash, one character of its class. So `routes/orders/[id]/*` matches the route directory `routes/orders/[id]/`, and also `routes/orders/i/`. Git pathspecs (`config-path`, `snapshot-path`) already match a path's own text first.
+In the shell patterns (`test-path`, `prohibit` and the exceptions file), a bracket expression matches either its own text or, as in bash, one character of its class. So `routes/orders/[id]/*` matches the route directory `routes/orders/[id]/`, and also `routes/orders/i/`. In the git pathspecs (`config-path`, `snapshot-path`), a bracket is a class, so write a bracket segment there as `*` or use `:(literal)`.
 
 The built-in check-config list covers CI workflows and actions, CODEOWNERS, git hook configs (lefthook, pre-commit, husky), `scripts/check-*`, the Rust toolchain, clippy, rustfmt, typos, deny, nextest, cargo-mutants and `.cargo/config`, golangci-lint, `tsconfig*.json`, Biome, ESLint, Vitest, Jest, Playwright and Stryker configs, semgrep and gitleaks configs, and codecov. `lib/config.bash` holds the exact list. A project with nothing to prohibit can go without a config file.
 
@@ -181,7 +181,7 @@ To bump ast-grep, set `version` and the four SHA-256s in `scripts/install-ast-gr
 
 A change that would fail a project that passed before is a new major version: a new rule on by default, a wider built-in list, or a new required input. A new rule that is off by default isn't.
 
-**`lib/` is an interface.** Other scripts, outside this repository, source `lib/config.bash` from a clone of it. A change to `lib/` must keep the names it defines (the rule list, the built-in lists, `wc_reset`, `wc_parse_config`, `wc_parse_exceptions` and the `wc_config_error` callback) and what they do stable for those callers, or ship as a new major version.
+**`lib/` is an interface.** Other scripts, outside this repository, source `lib/config.bash` from a clone of it. A change to `lib/` must keep the names it defines (the rule list, the built-in lists, `wc_reset`, `wc_parse_config`, `wc_parse_exceptions`, `wc_match` and the `wc_config_error` callback) and what they do stable for those callers, or ship as a new major version.
 
 ### Releasing
 

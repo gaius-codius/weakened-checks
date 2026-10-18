@@ -209,6 +209,21 @@ exit_code "a branch fixing the base's rejected entry" 0 "$explained"
 has "a branch fixing the base's rejected entry" '  - check config changed: .github/weakened-checks.conf'
 grep -qF "which this branch's config fixes" <<<"$out" ||
   { echo "FAIL: the base's config error isn't reported: $out"; fail=1; }
+fresh; on_main .github/weakened-checks.conf 'config-path @defaults :(bogus)x\n'
+git rm -q .github/weakened-checks.conf; commit
+exit_code "a branch deleting a config git rejects" 0 "$explained"
+for spec in ':(top)*.snap' ':(glob)**/*.snap'; do
+  fresh; on_main a.snap 'x\n'; on_main .github/weakened-checks.conf "snapshot-path $spec :(bogus)y\n"
+  put a.snap 'y\n'; commit
+  exit_code "a positive $spec next to a rejected entry" 2 "$explained"
+  has "a positive $spec next to a rejected entry" '  - snapshot changed: a.snap'
+done
+for spec in ':/!vendor/*' ':(top,exclude)vendor/*'; do
+  fresh; on_main other.txt 'x\n'; on_main .github/weakened-checks.conf "snapshot-path :(bogus)y $spec\n"
+  put other.txt 'y\n'; commit
+  exit_code "only $spec left once the rejected entry goes" 2 "$explained"
+  lacks "only $spec left once the rejected entry goes" 'snapshot changed: other.txt'
+done
 fresh; on_main .github/weakened-checks.conf 'config-path @defaults\n'
 put .github/weakened-checks.conf 'config-path @defaults :(bogus)x\n'; commit
 exit_code "a branch adding an entry git rejects" 2 "$explained"
@@ -217,6 +232,14 @@ grep -qF '.github/weakened-checks.conf at pr: config-path: git rejects the paths
 fresh; on_main .github/weakened-checks.conf 'config-path @defaults\n'
 put .github/weakened-checks.conf 'config-path @defaults\nno-such-directive x\n'; commit
 exit_code "a branch adding an unknown directive" 2 "$explained"
+fresh; on_main .github/weakened-checks.conf 'disable snapshot\n'
+put .github/weakened-checks.conf 'disable snapshot\nexceptions ../x\n'; commit
+exit_code "a branch adding an exceptions path outside the repository" 2 "$explained"
+grep -qF 'exceptions: git rejects the path ../x' <<<"$out" ||
+  { echo "FAIL: the rejected exceptions path isn't named: $out"; fail=1; }
+fresh; on_main .github/weakened-checks.conf 'exceptions ../x\n'; put a.txt 'x\n'; commit
+exit_code "a base exceptions path outside the repository" 2 "$explained"
+lacks "a config error isn't nothing found" 'nothing found'
 
 # Renames: a test file renamed out of a prohibited pattern, or out of the
 # test paths, takes its tests with it.
@@ -245,7 +268,23 @@ expect pass "a snapshot renamed unchanged" "$unexplained"
 fresh; on_main snaps/a.snap 'x\nx\nx\nx\nx\n'
 git mv snaps/a.snap snaps/b.snap; put snaps/b.snap 'x\nx\nx\nx\ny\n'; commit
 expect fail "a snapshot renamed and accepted again" "$unexplained"
-has "a snapshot renamed and accepted again" '  - snapshot changed: snaps/b.snap'
+has "a snapshot renamed and accepted again" '  - snapshot changed: snaps/a.snap -> snaps/b.snap'
+fresh; on_main golden/a.snap 'x\nx\nx\nx\nx\n'; on_main .github/weakened-checks.conf 'prohibit snapshot golden/*\n'
+mkdir -p other && git mv golden/a.snap other/a.snap; put other/a.snap 'x\nx\nx\nx\ny\n'; commit
+expect fail "a snapshot renamed out of a prohibited path and accepted again" "$explained"
+fresh; on_main golden/a.snap 'x\n'; on_main .github/weakened-checks.conf 'prohibit snapshot golden/*\n'
+mkdir -p other && git mv golden/a.snap other/a.snap; commit
+expect fail "a snapshot moved unchanged out of a prohibited path" "$explained"
+has "a snapshot moved unchanged out of a prohibited path" '  - snapshot moved out of golden/*: golden/a.snap -> other/a.snap'
+fresh; on_main golden/a.snap 'x\n'; on_main .github/weakened-checks.conf 'prohibit snapshot golden/*\n'
+git mv golden/a.snap golden/b.snap; commit
+expect pass "a snapshot moved unchanged within a prohibited path" "$unexplained"
+fresh; on_main 'tests/my dir/a.test.ts' 'it("a", f);\nit("b", f);\n'
+put 'tests/my dir/a.test.ts' 'it("a", f);\n'; commit
+expect fail "a test removed in a path with a space" "$unexplained"
+fresh; on_main tests/a.test.ts 'it("a", f);\nit("b", f);\n'
+mkdir -p 'tests/my dir' && git mv tests/a.test.ts 'tests/my dir/a.test.ts'; commit
+expect pass "a test file renamed into a path with a space" "$unexplained"
 fresh; on_main Cargo.toml '[workspace.lints.rust]\nunsafe_code = "deny"\n'
 on_main crates/a/Cargo.toml '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n\n[lints]\nworkspace = true\n'
 mkdir -p crates/b && git mv crates/a/Cargo.toml crates/b/Cargo.toml

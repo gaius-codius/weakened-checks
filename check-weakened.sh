@@ -98,6 +98,18 @@ wc_parse_config "$cfg_text" "$cfg_path"
 # after the report) and the rest still match. Whether git accepts a pathspec
 # doesn't depend on the commits, so an empty diff tells. The built-in entries
 # are known to be good.
+# is_exclude PATHSPEC: whether it's an exclude, by its magic: a long form
+# naming exclude (":(exclude,glob)x"), or a short form with ! or ^ (":!x",
+# ":/^x").
+is_exclude() {
+  if [[ $1 =~ ^:\(([^\)]*)\) ]]; then
+    [[ ,${BASH_REMATCH[1]}, == *,exclude,* ]]
+  elif [[ $1 =~ ^:([/!^]*) ]]; then
+    [[ ${BASH_REMATCH[1]} == *[\!^]* ]]
+  else
+    return 1
+  fi
+}
 declare -A builtin_spec=([':(glob)crates/*/Cargo.toml']=1)
 for p in "${default_config_paths[@]}" "${default_snapshot_paths[@]}"; do builtin_spec[$p]=1; done
 drop_rejected() { # config name, directive, list name, error file
@@ -110,7 +122,7 @@ drop_rejected() { # config name, directive, list name, error file
       continue
     fi
     kept+=("$p")
-    [[ $p =~ ^:(!|\^|\([^\)]*exclude) ]] || positive=1
+    is_exclude "$p" || positive=1
   done
   # Without its rejected entries, a list of only excludes would match every
   # path.
@@ -125,17 +137,26 @@ drop_all_rejected() { # config name, error file
     drop_rejected "$1" cargo-members members "$2"
     cargo_members=${members[0]:-none}
   fi
+  # The exceptions file is a path, which git rejects only outside the
+  # repository; it couldn't be read from there either.
+  local err
+  if [[ $exceptions_path != none ]] &&
+    ! err=$(gitq diff --quiet "$mb" "$mb" -- ":(literal)$exceptions_path" 2>&1); then
+    echo "$1: exceptions: git rejects the path $exceptions_path (${err##*$'\n'})" >>"$2"
+    exceptions_path=none
+  fi
 }
 : >"$tmp/config-errors"
 drop_all_rejected "$cfg_path" "$tmp/config-errors"
 # A branch that changes the config is checked against the base's, but its own
 # must be sound too, or once merged every later branch would fail, the one
 # that fixes it included. So its errors fail this branch, and the base's
-# errors only warn when the branch's config has none.
+# errors only warn when the branch's config has none (a branch that deletes
+# the config has the built-in one).
 : >"$tmp/config-warnings"
-if [[ -n $cfg_in_repo ]] && head_cfg=$(git show "$head:$cfg_path" 2>/dev/null) &&
-  [[ $head_cfg != "$cfg_text" ]]; then
-  : >"$tmp/head-config-errors"
+: >"$tmp/head-config-errors"
+head_cfg=$(git show "$head:$cfg_path" 2>/dev/null) || head_cfg=""
+if [[ -n $cfg_in_repo && $head_cfg != "$cfg_text" ]]; then
   (
     wc_config_error() { echo "$*" >>"$tmp/head-config-errors"; }
     wc_reset
@@ -147,7 +168,6 @@ if [[ -n $cfg_in_repo ]] && head_cfg=$(git show "$head:$cfg_path" 2>/dev/null) &
     mv "$tmp/config-errors" "$tmp/config-warnings"
     : >"$tmp/config-errors"
   fi
-  cat "$tmp/head-config-errors" >>"$tmp/config-errors"
 fi
 
 # The exceptions file, from HEAD: one "RULE PATTERN REASON..." per line.
@@ -156,10 +176,12 @@ if [[ $exceptions_path != none ]] && ex_text=$(git show "$head:$exceptions_path"
 fi
 
 # Findings: rule, path, message.
-f_rule=() f_path=() f_msg=()
-finding() {
+# A renamed file's finding also has its old path, so a prohibition can't be
+# left by moving the file.
+f_rule=() f_path=() f_msg=() f_old=()
+finding() { # rule, path, message, [old path]
   on "$1" || return 0
-  f_rule+=("$1") f_path+=("$2") f_msg+=("$3")
+  f_rule+=("$1") f_path+=("$2") f_msg+=("$3") f_old+=("${4:-}")
 }
 
 # Config that defines the checks, this detector's own config and exceptions
@@ -183,8 +205,8 @@ fi
 diff_lines() { # git diff arguments...
   gitq diff -U0 --no-color --no-ext-diff "$mb" "$head" "$@" | awk '
     /^diff --git / { header = 1; next }
-    header && /^--- / { old = substr($0, 5); sub(/^a\//, "", old); next }
-    header && /^\+\+\+ / { new = substr($0, 5); sub(/^b\//, "", new); file = new == "/dev/null" ? old : new; next }
+    header && /^--- / { old = substr($0, 5); sub(/^a\//, "", old); sub(/\t$/, "", old); next }
+    header && /^\+\+\+ / { new = substr($0, 5); sub(/^b\//, "", new); sub(/\t$/, "", new); file = new == "/dev/null" ? old : new; next }
     /^@@/ { header = 0; next }
     header { next }
     { print file "\t" $0 }'
@@ -232,7 +254,7 @@ ast_exts=('*.rs' '*.go' '*.ts' '*.mts' '*.cts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*
 gitq diff -U0 --no-color --no-ext-diff --diff-filter=AMR "$mb" "$head" -- "${ast_exts[@]}" '*.svelte' |
   awk '
     /^diff --git / { header = 1; next }
-    header && /^\+\+\+ / { file = substr($0, 5); sub(/^b\//, "", file); next }
+    header && /^\+\+\+ / { file = substr($0, 5); sub(/^b\//, "", file); sub(/\t$/, "", file); next }
     /^@@/ {
       header = 0
       n = split(substr($3, 2), p, ",")
@@ -319,8 +341,8 @@ bound_lines() { # - for the base's side, + for the branch's
         hash_re = "^.[ \t]*[^# \t].*[ \t]#[ \t]*" tag "[ \t\r]*$"
       }
       /^diff --git / { header = 1; hashed = /\.(sh|bash|py)$/; next }
-      header && /^--- / { old = substr($0, 5); sub(/^a\//, "", old); next }
-      header && /^\+\+\+ / { new = substr($0, 5); sub(/^b\//, "", new); next }
+      header && /^--- / { old = substr($0, 5); sub(/^a\//, "", old); sub(/\t$/, "", old); next }
+      header && /^\+\+\+ / { new = substr($0, 5); sub(/^b\//, "", new); sub(/\t$/, "", new); next }
       /^@@/ { header = 0; next }
       header { next }
       substr($0, 1, 1) != side { next }
@@ -397,8 +419,18 @@ if on snapshot && [[ ${#snapshot_paths[@]} -gt 0 ]]; then
     die "git diff failed on the snapshot paths"
   while IFS=$'\t' read -r status f renamed; do
     case $status in
-      R100) continue ;;
-      R*) f=$renamed ;;
+      R100)
+        # Moved unchanged: only a move out of a prohibition counts, since
+        # later changes at the new path wouldn't be prohibited.
+        for p in "${prohibits[@]}"; do
+          IFS=$'\t' read -r rule pattern <<<"$p"
+          if [[ $rule == snapshot ]] && wc_match "$f" "$pattern" && ! wc_match "$renamed" "$pattern"; then
+            finding snapshot "$renamed" "snapshot moved out of $pattern: $f -> $renamed" "$f"
+            break
+          fi
+        done
+        continue ;;
+      R*) finding snapshot "$renamed" "snapshot changed: $f -> $renamed" "$f"; continue ;;
     esac
     [[ -n $f ]] && finding snapshot "$f" "snapshot changed: $f"
   done <"$tmp/snapshots"
@@ -410,12 +442,17 @@ fi
 # rule and a pattern matching the path (or, for tests removed, the
 # prohibition's pattern) makes it advisory again.
 advisory=() prohibited=()
-classify() { # rule, path, message
-  local p rule pattern reason
+classify() { # rule, path, message, old path
+  local p rule pattern reason path
   for p in "${prohibits[@]}"; do
     IFS=$'\t' read -r rule pattern <<<"$p"
-    if [[ $rule == "$1" && -n $2 ]] && wc_match "$2" "$pattern"; then
-      if reason=$(excepted "$1" "$2"); then
+    [[ $rule == "$1" ]] || continue
+    path=""
+    if [[ -n $2 ]] && wc_match "$2" "$pattern"; then path=$2
+    elif [[ -n $4 ]] && wc_match "$4" "$pattern"; then path=$4
+    fi
+    if [[ -n $path ]]; then
+      if reason=$(excepted "$1" "$path"); then
         advisory+=("$3 (prohibited in $pattern; allowed by $exceptions_path: $reason)")
       else
         prohibited+=("$3")
@@ -426,7 +463,7 @@ classify() { # rule, path, message
   advisory+=("$3")
 }
 for i in "${!f_rule[@]}"; do
-  classify "${f_rule[$i]}" "${f_path[$i]}" "${f_msg[$i]}"
+  classify "${f_rule[$i]}" "${f_path[$i]}" "${f_msg[$i]}" "${f_old[$i]}"
 done
 if on tests-removed; then
   for p in "${prohibits[@]}"; do
@@ -450,7 +487,7 @@ fi
 # one in CI, and 2 for a config error, whatever the findings.
 verdict() {
   if (( ${#advisory[@]} + ${#prohibited[@]} == 0 )); then
-    echo "check-weakened: nothing found"
+    [[ -s $tmp/config-errors || -s $tmp/head-config-errors ]] || echo "check-weakened: nothing found"
     return 0
   fi
   if (( ${#advisory[@]} > 0 )); then
@@ -483,6 +520,12 @@ fi
 if [[ -s $tmp/config-errors ]]; then
   echo "Config errors (the findings above leave these entries out):"
   sed 's/^/  - /' "$tmp/config-errors"
+fi
+if [[ -s $tmp/head-config-errors ]]; then
+  echo "Config errors in this branch's $cfg_path (merged, they would fail every branch):"
+  sed 's/^/  - /' "$tmp/head-config-errors"
+fi
+if [[ -s $tmp/config-errors || -s $tmp/head-config-errors ]]; then
   echo "Fix the config; until then this check fails." >&2
   status=2
 fi
