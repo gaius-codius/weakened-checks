@@ -19,8 +19,10 @@
 # The config (default .github/weakened-checks.conf) is read from BASE, so a
 # branch can't relax the rules it is checked against; from HEAD when BASE has
 # none yet; and from disk when it isn't in the repository at all. The
-# exceptions file is read from HEAD. Both count as check config. See
-# README.md for the rules, the config format and the exceptions file.
+# exceptions file is read from HEAD. Both count as check config. A config
+# error exits 2: a config entry git rejects as a pathspec is reported after
+# the findings, which the other entries still find. See README.md for the
+# rules, the config format and the exceptions file.
 #
 # Requires: bash 4, git, awk, jq; ast-grep (scripts/install-ast-grep.sh
 # fetches the pinned version when a changed file needs it).
@@ -90,6 +92,64 @@ wc_config_error() { die "$@"; }
 wc_reset
 wc_parse_config "$cfg_text" "$cfg_path"
 
+# The config's pathspecs that git rejects. One bad entry would fail the whole
+# diff it's in, which would then report nothing, so each entry from the
+# config is tried on its own first; a rejected one is a config error (exit 2
+# after the report) and the rest still match. Whether git accepts a pathspec
+# doesn't depend on the commits, so an empty diff tells. The built-in entries
+# are known to be good.
+declare -A builtin_spec=([':(glob)crates/*/Cargo.toml']=1)
+for p in "${default_config_paths[@]}" "${default_snapshot_paths[@]}"; do builtin_spec[$p]=1; done
+drop_rejected() { # config name, directive, list name, error file
+  local -n specs=$3
+  local p err kept=() dropped="" positive=""
+  for p in "${specs[@]}"; do
+    if [[ -z ${builtin_spec[$p]:-} ]] && ! err=$(gitq diff --quiet "$mb" "$mb" -- "$p" 2>&1); then
+      echo "$1: $2: git rejects the pathspec $p (${err##*$'\n'})" >>"$4"
+      dropped=1
+      continue
+    fi
+    kept+=("$p")
+    [[ $p =~ ^:(!|\^|\([^\)]*exclude) ]] || positive=1
+  done
+  # Without its rejected entries, a list of only excludes would match every
+  # path.
+  if [[ -n $dropped && -z $positive ]]; then kept=(); fi
+  specs=("${kept[@]}")
+}
+drop_all_rejected() { # config name, error file
+  drop_rejected "$1" config-path config_paths "$2"
+  drop_rejected "$1" snapshot-path snapshot_paths "$2"
+  if [[ $cargo_members != none ]]; then
+    local members=("$cargo_members")
+    drop_rejected "$1" cargo-members members "$2"
+    cargo_members=${members[0]:-none}
+  fi
+}
+: >"$tmp/config-errors"
+drop_all_rejected "$cfg_path" "$tmp/config-errors"
+# A branch that changes the config is checked against the base's, but its own
+# must be sound too, or once merged every later branch would fail, the one
+# that fixes it included. So its errors fail this branch, and the base's
+# errors only warn when the branch's config has none.
+: >"$tmp/config-warnings"
+if [[ -n $cfg_in_repo ]] && head_cfg=$(git show "$head:$cfg_path" 2>/dev/null) &&
+  [[ $head_cfg != "$cfg_text" ]]; then
+  : >"$tmp/head-config-errors"
+  (
+    wc_config_error() { echo "$*" >>"$tmp/head-config-errors"; }
+    wc_reset
+    if wc_parse_config "$head_cfg" "$cfg_path at $head_arg"; then
+      drop_all_rejected "$cfg_path at $head_arg" "$tmp/head-config-errors"
+    fi
+  )
+  if [[ ! -s $tmp/head-config-errors ]]; then
+    mv "$tmp/config-errors" "$tmp/config-warnings"
+    : >"$tmp/config-errors"
+  fi
+  cat "$tmp/head-config-errors" >>"$tmp/config-errors"
+fi
+
 # The exceptions file, from HEAD: one "RULE PATTERN REASON..." per line.
 if [[ $exceptions_path != none ]] && ex_text=$(git show "$head:$exceptions_path" 2>/dev/null); then
   wc_parse_exceptions "$ex_text"
@@ -105,13 +165,16 @@ finding() {
 # Config that defines the checks, this detector's own config and exceptions
 # included.
 if on check-config; then
+  # The config and exceptions files are paths, not pathspecs.
   paths=("${config_paths[@]}")
-  [[ -n $cfg_in_repo ]] && paths+=("$cfg_in_repo")
-  [[ $exceptions_path != none ]] && paths+=("$exceptions_path")
+  [[ -n $cfg_in_repo ]] && paths+=(":(literal)$cfg_in_repo")
+  [[ $exceptions_path != none ]] && paths+=(":(literal)$exceptions_path")
   if [[ ${#paths[@]} -gt 0 ]]; then
+    gitq diff --name-only "$mb" "$head" -- "${paths[@]}" >"$tmp/config-changed" ||
+      die "git diff failed on the check-config paths"
     while IFS= read -r f; do
       [[ -n $f ]] && finding check-config "$f" "check config changed: $f"
-    done < <(gitq diff --name-only "$mb" "$head" -- "${paths[@]}" | sort -u)
+    done < <(sort -u "$tmp/config-changed")
   fi
 fi
 
@@ -147,6 +210,9 @@ fi
 # a workspace that has lints to inherit.
 if on cargo-workspace-lints && [[ $cargo_members != none ]] &&
   git show "$head:Cargo.toml" 2>/dev/null | grep -qE '^[[:space:]]*\[workspace\.lints'; then
+  # Renamed members count, as moved crates.
+  gitq diff --name-only --diff-filter=AMR "$mb" "$head" -- "$cargo_members" >"$tmp/members" ||
+    die "git diff failed on the cargo-members pathspec"
   while IFS= read -r f; do
     [[ -z $f ]] && continue
     if ! git show "$head:$f" | awk '
@@ -155,7 +221,7 @@ if on cargo-workspace-lints && [[ $cargo_members != none ]] &&
         END { exit !found }'; then
       finding cargo-workspace-lints "$f" "crate does not inherit the workspace lints: $f"
     fi
-  done < <(gitq diff --name-only --diff-filter=AM "$mb" "$head" -- "$cargo_members")
+  done <"$tmp/members"
 fi
 
 # Annotations that silence a check or skip a test, on lines the branch adds:
@@ -278,9 +344,11 @@ fi
 # Tests removed: more test declarations deleted than added, per language
 # (Rust's #[test] attributes in any file; Go, JavaScript, TypeScript and
 # Python test functions in test files). Counted over the whole diff, so a
-# test moved between files isn't reported.
+# test moved between files isn't reported. Without rename detection, so a
+# renamed file's tests count as leaving its old path and arriving at its new
+# one: a prohibition's pattern, or the test paths, can't be left by a rename.
 test_counts() { # prints "language<TAB>path<TAB>removed<TAB>added" per file
-  diff_lines -- '*.rs' '*.go' '*.ts' '*.mts' '*.cts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' '*.py' |
+  diff_lines --no-renames -- '*.rs' '*.go' '*.ts' '*.mts' '*.cts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' '*.py' |
     awk -F'\t' '
       {
         line = substr($0, length($1) + 2)
@@ -322,11 +390,18 @@ if on tests-removed; then
   done
 fi
 
-# Snapshot and golden files changed (accepted again, or deleted).
-if on snapshot; then
-  while IFS= read -r f; do
+# Snapshot and golden files changed (accepted again, or deleted), renamed
+# ones included unless their content is unchanged.
+if on snapshot && [[ ${#snapshot_paths[@]} -gt 0 ]]; then
+  gitq diff --name-status --diff-filter=MDR "$mb" "$head" -- "${snapshot_paths[@]}" >"$tmp/snapshots" ||
+    die "git diff failed on the snapshot paths"
+  while IFS=$'\t' read -r status f renamed; do
+    case $status in
+      R100) continue ;;
+      R*) f=$renamed ;;
+    esac
     [[ -n $f ]] && finding snapshot "$f" "snapshot changed: $f"
-  done < <(gitq diff --name-only --diff-filter=MD "$mb" "$head" -- "${snapshot_paths[@]}")
+  done <"$tmp/snapshots"
 fi
 
 # Prohibitions. A finding is prohibited when its rule is prohibited in a
@@ -339,8 +414,7 @@ classify() { # rule, path, message
   local p rule pattern reason
   for p in "${prohibits[@]}"; do
     IFS=$'\t' read -r rule pattern <<<"$p"
-    # shellcheck disable=SC2053 # the pattern is meant to match.
-    if [[ $rule == "$1" && -n $2 && $2 == $pattern ]]; then
+    if [[ $rule == "$1" && -n $2 ]] && wc_match "$2" "$pattern"; then
       if reason=$(excepted "$1" "$2"); then
         advisory+=("$3 (prohibited in $pattern; allowed by $exceptions_path: $reason)")
       else
@@ -360,8 +434,7 @@ if on tests-removed; then
     [[ $rule == tests-removed ]] || continue
     r=0 a=0
     while IFS=$'\t' read -r lang f fr fa; do
-      # shellcheck disable=SC2053 # the pattern is meant to match.
-      [[ $f == $pattern ]] && r=$((r + fr)) a=$((a + fa))
+      wc_match "$f" "$pattern" && r=$((r + fr)) a=$((a + fa))
     done <"$tmp/tests"
     (( r > a )) || continue
     msg="tests removed in $pattern: $r deleted, $a added"
@@ -373,29 +446,44 @@ if on tests-removed; then
   done
 fi
 
-if (( ${#advisory[@]} + ${#prohibited[@]} == 0 )); then
-  echo "check-weakened: nothing found"
-  exit 0
+# The report, then the verdict: 1 for a prohibited finding or an unexplained
+# one in CI, and 2 for a config error, whatever the findings.
+verdict() {
+  if (( ${#advisory[@]} + ${#prohibited[@]} == 0 )); then
+    echo "check-weakened: nothing found"
+    return 0
+  fi
+  if (( ${#advisory[@]} > 0 )); then
+    echo "Changes that weaken or bypass a check:"
+    printf '  - %s\n' "${advisory[@]}"
+  fi
+  if (( ${#prohibited[@]} > 0 )); then
+    echo "Prohibited here (a \"Check changes:\" line doesn't allow these; an entry in $exceptions_path does):"
+    printf '  - %s\n' "${prohibited[@]}"
+    echo "Undo these, or add an exception with its reason to $exceptions_path." >&2
+    return 1
+  fi
+  if [[ -z ${PR_BODY+x} ]]; then
+    echo "(report only; in CI the PR body must explain these in a \"Check changes:\" line)"
+    return 0
+  fi
+  if grep -qiE '^[[:space:]]*check changes:[[:space:]]*[^[:space:]]' <<<"$PR_BODY"; then
+    echo "Explained in the PR body."
+    return 0
+  fi
+  echo "Add a line starting \"Check changes:\" to the PR body explaining why." >&2
+  return 1
+}
+status=0
+verdict || status=$?
+if [[ -s $tmp/config-warnings ]]; then
+  echo "Config errors in $cfg_path at $base_arg, which this branch's config fixes:"
+  sed 's/^/  - /' "$tmp/config-warnings"
 fi
-
-if (( ${#advisory[@]} > 0 )); then
-  echo "Changes that weaken or bypass a check:"
-  printf '  - %s\n' "${advisory[@]}"
+if [[ -s $tmp/config-errors ]]; then
+  echo "Config errors (the findings above leave these entries out):"
+  sed 's/^/  - /' "$tmp/config-errors"
+  echo "Fix the config; until then this check fails." >&2
+  status=2
 fi
-if (( ${#prohibited[@]} > 0 )); then
-  echo "Prohibited here (a \"Check changes:\" line doesn't allow these; an entry in $exceptions_path does):"
-  printf '  - %s\n' "${prohibited[@]}"
-  echo "Undo these, or add an exception with its reason to $exceptions_path." >&2
-  exit 1
-fi
-
-if [[ -z ${PR_BODY+x} ]]; then
-  echo "(report only; in CI the PR body must explain these in a \"Check changes:\" line)"
-  exit 0
-fi
-if grep -qiE '^[[:space:]]*check changes:[[:space:]]*[^[:space:]]' <<<"$PR_BODY"; then
-  echo "Explained in the PR body."
-  exit 0
-fi
-echo "Add a line starting \"Check changes:\" to the PR body explaining why." >&2
-exit 1
+exit "$status"
