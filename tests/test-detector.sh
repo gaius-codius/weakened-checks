@@ -170,6 +170,152 @@ if "$script" --config missing.conf main pr >/dev/null 2>&1; then
   echo "FAIL: --config naming a missing file passed"; fail=1
 fi
 
+# A config entry git rejects as a pathspec is a config error (exit 2), and
+# the other entries still match.
+exit_code() { # NAME WANT [ENV=VALUE...]
+  local name=$1 want=$2 got=0
+  shift 2
+  out=$(env "$@" "$script" main pr 2>&1) || got=$?
+  if [[ $got != "$want" ]]; then
+    echo "FAIL: $name: wanted exit $want, got $got"
+    printf '    %s\n' "${out//$'\n'/$'\n'    }"
+    fail=1
+  fi
+}
+fresh; on_main .github/weakened-checks.conf 'config-path @defaults :(bogus)x extra.cfg\n'
+put extra.cfg 'x\n'; put .github/workflows/ci.yml 'x\n'; commit
+exit_code "a config-path entry git rejects" 2 "$explained"
+has "a config-path entry git rejects" '  - check config changed: extra.cfg'
+has "a config-path entry git rejects" '  - check config changed: .github/workflows/ci.yml'
+grep -qF ".github/weakened-checks.conf: config-path: git rejects the pathspec :(bogus)x" <<<"$out" ||
+  { echo "FAIL: the rejected config-path entry isn't named: $out"; fail=1; }
+fresh; on_main a.snap 'x\n'; on_main .github/weakened-checks.conf 'snapshot-path *.snap :(bogus)y\n'
+put a.snap 'y\n'; commit
+exit_code "a snapshot-path entry git rejects" 2 "$explained"
+has "a snapshot-path entry git rejects" '  - snapshot changed: a.snap'
+fresh; on_main other.txt 'x\n'; on_main .github/weakened-checks.conf 'snapshot-path :(bogus)y :!vendor/*\n'
+put other.txt 'y\n'; commit
+exit_code "only an exclude left once the rejected entry goes" 2 "$explained"
+lacks "only an exclude left once the rejected entry goes" 'snapshot changed: other.txt'
+fresh; on_main Cargo.toml '[workspace.lints.rust]\nunsafe_code = "deny"\n'
+on_main .github/weakened-checks.conf 'cargo-members :(bogus)z\n'
+put crates/a/Cargo.toml '[package]\nname = "a"\n'; commit
+exit_code "a cargo-members pathspec git rejects" 2 "$explained"
+grep -qF 'cargo-members: git rejects the pathspec :(bogus)z' <<<"$out" ||
+  { echo "FAIL: the rejected cargo-members value isn't named: $out"; fail=1; }
+fresh; on_main .github/weakened-checks.conf 'config-path @defaults :(bogus)x\n'
+put .github/weakened-checks.conf 'config-path @defaults\n'; commit
+exit_code "a branch fixing the base's rejected entry" 0 "$explained"
+has "a branch fixing the base's rejected entry" '  - check config changed: .github/weakened-checks.conf'
+grep -qF "which this branch's config fixes" <<<"$out" ||
+  { echo "FAIL: the base's config error isn't reported: $out"; fail=1; }
+fresh; on_main .github/weakened-checks.conf 'config-path @defaults :(bogus)x\n'
+git rm -q .github/weakened-checks.conf; commit
+exit_code "a branch deleting a config git rejects" 0 "$explained"
+for spec in ':(top)*.snap' ':(glob)**/*.snap'; do
+  fresh; on_main a.snap 'x\n'; on_main .github/weakened-checks.conf "snapshot-path $spec :(bogus)y\n"
+  put a.snap 'y\n'; commit
+  exit_code "a positive $spec next to a rejected entry" 2 "$explained"
+  has "a positive $spec next to a rejected entry" '  - snapshot changed: a.snap'
+done
+for spec in ':/!vendor/*' ':(top,exclude)vendor/*'; do
+  fresh; on_main other.txt 'x\n'; on_main .github/weakened-checks.conf "snapshot-path :(bogus)y $spec\n"
+  put other.txt 'y\n'; commit
+  exit_code "only $spec left once the rejected entry goes" 2 "$explained"
+  lacks "only $spec left once the rejected entry goes" 'snapshot changed: other.txt'
+done
+fresh; on_main .github/weakened-checks.conf 'config-path @defaults\n'
+put .github/weakened-checks.conf 'config-path @defaults :(bogus)x\n'; commit
+exit_code "a branch adding an entry git rejects" 2 "$explained"
+grep -qF '.github/weakened-checks.conf at pr: config-path: git rejects the pathspec :(bogus)x' <<<"$out" ||
+  { echo "FAIL: the branch's rejected entry isn't named: $out"; fail=1; }
+fresh; on_main .github/weakened-checks.conf 'config-path @defaults\n'
+put .github/weakened-checks.conf 'config-path @defaults\nno-such-directive x\n'; commit
+exit_code "a branch adding an unknown directive" 2 "$explained"
+fresh; on_main .github/weakened-checks.conf 'disable snapshot\n'
+put .github/weakened-checks.conf 'disable snapshot\nexceptions ../x\n'; commit
+exit_code "a branch adding an exceptions path outside the repository" 2 "$explained"
+grep -qF 'exceptions: git rejects the path ../x' <<<"$out" ||
+  { echo "FAIL: the rejected exceptions path isn't named: $out"; fail=1; }
+fresh; on_main .github/weakened-checks.conf 'exceptions ../x\n'; put a.txt 'x\n'; commit
+exit_code "a base exceptions path outside the repository" 2 "$explained"
+lacks "a config error isn't nothing found" 'nothing found'
+
+# Renames: a test file renamed out of a prohibited pattern, or out of the
+# test paths, takes its tests with it.
+conf='prohibit tests-removed clinical/*\n'
+fresh; on_main clinical/a.test.ts 'it("a", f);\nit("b", f);\n'; on_main .github/weakened-checks.conf "$conf"
+mkdir -p other && git mv clinical/a.test.ts other/a.test.ts; commit
+expect fail "a test file renamed out of a prohibited path" "$explained"
+has "a test file renamed out of a prohibited path" '  - tests removed in clinical/*: 2 deleted, 0 added'
+lacks "a rename moves tests, whole-diff" 'JavaScript or TypeScript tests deleted'
+fresh; on_main clinical/a.test.ts 'it("a", f);\nit("b", f);\n'; on_main .github/weakened-checks.conf "$conf"
+git mv clinical/a.test.ts clinical/b.test.ts; commit
+expect pass "a test file renamed within a prohibited path" "$unexplained"
+fresh; on_main clinical/lib.rs '#[test]\nfn a() {}\n'; on_main .github/weakened-checks.conf "$conf"
+git mv clinical/lib.rs clinical/moved.rs; commit
+expect pass "a Rust test file renamed within a prohibited path" "$unexplained"
+fresh; on_main other/lib.rs '#[test]\nfn a() {}\n'; on_main .github/weakened-checks.conf "$conf"
+mkdir -p clinical && git mv other/lib.rs clinical/lib.rs; commit
+expect pass "a Rust test file renamed into a prohibited path" "$unexplained"
+fresh; on_main src/a.test.ts 'it("a", f);\nit("b", f);\n'
+git mv src/a.test.ts src/a.ts; commit
+expect fail "a test file renamed out of the test paths" "$unexplained"
+has "a test file renamed out of the test paths" '  - tests removed: 2 JavaScript or TypeScript tests deleted, 0 added'
+fresh; on_main snaps/a.snap 'x\nx\nx\nx\nx\n'
+git mv snaps/a.snap snaps/b.snap; commit
+expect pass "a snapshot renamed unchanged" "$unexplained"
+fresh; on_main snaps/a.snap 'x\nx\nx\nx\nx\n'
+git mv snaps/a.snap snaps/b.snap; put snaps/b.snap 'x\nx\nx\nx\ny\n'; commit
+expect fail "a snapshot renamed and accepted again" "$unexplained"
+has "a snapshot renamed and accepted again" '  - snapshot changed: snaps/a.snap -> snaps/b.snap'
+fresh; on_main golden/a.snap 'x\nx\nx\nx\nx\n'; on_main .github/weakened-checks.conf 'prohibit snapshot golden/*\n'
+mkdir -p other && git mv golden/a.snap other/a.snap; put other/a.snap 'x\nx\nx\nx\ny\n'; commit
+expect fail "a snapshot renamed out of a prohibited path and accepted again" "$explained"
+fresh; on_main golden/a.snap 'x\n'; on_main .github/weakened-checks.conf 'prohibit snapshot golden/*\n'
+mkdir -p other && git mv golden/a.snap other/a.snap; commit
+expect fail "a snapshot moved unchanged out of a prohibited path" "$explained"
+has "a snapshot moved unchanged out of a prohibited path" '  - snapshot moved out of golden/*: golden/a.snap -> other/a.snap'
+fresh; on_main golden/a.snap 'x\n'; on_main .github/weakened-checks.conf 'prohibit snapshot golden/*\n'
+git mv golden/a.snap golden/b.snap; commit
+expect pass "a snapshot moved unchanged within a prohibited path" "$unexplained"
+fresh; on_main 'tests/my dir/a.test.ts' 'it("a", f);\nit("b", f);\n'
+put 'tests/my dir/a.test.ts' 'it("a", f);\n'; commit
+expect fail "a test removed in a path with a space" "$unexplained"
+fresh; on_main tests/a.test.ts 'it("a", f);\nit("b", f);\n'
+mkdir -p 'tests/my dir' && git mv tests/a.test.ts 'tests/my dir/a.test.ts'; commit
+expect pass "a test file renamed into a path with a space" "$unexplained"
+fresh; on_main Cargo.toml '[workspace.lints.rust]\nunsafe_code = "deny"\n'
+on_main crates/a/Cargo.toml '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n\n[lints]\nworkspace = true\n'
+mkdir -p crates/b && git mv crates/a/Cargo.toml crates/b/Cargo.toml
+put crates/b/Cargo.toml '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n'; commit
+run || true
+has "a crate moved without the workspace lints" '  - crate does not inherit the workspace lints: crates/b/Cargo.toml'
+
+fresh; on_main .github/workflows/ci.yml 'a\nb\nc\nd\n'; on_main .github/weakened-checks.conf 'prohibit check-config .github/workflows/*\n'
+mkdir -p .husky && git mv .github/workflows/ci.yml .husky/ci.yml; commit
+expect fail "a workflow moved out of a prohibited path into another config path" "$explained"
+has "a workflow moved out of a prohibited path into another config path" '  - check config changed: .github/workflows/ci.yml'
+
+# Bracket segments in shell patterns match their own text.
+fresh; on_main .github/weakened-checks.conf 'prohibit ts-nocheck routes/*\n'
+put 'routes/orders/[id]/edit/x.ts' '// @ts-nocheck\n'
+put .github/weakened-checks-exceptions 'ts-nocheck routes/orders/[id]/edit/x.ts generated route types\n'; commit
+expect pass "an exception for a bracket route segment" "$explained"
+has "an exception for a bracket route segment" '  - added: routes/orders/[id]/edit/x.ts:1: // @ts-nocheck [ts-nocheck] (prohibited in routes/*; allowed by .github/weakened-checks-exceptions: generated route types)'
+fresh; on_main .github/weakened-checks.conf 'prohibit ts-nocheck routes/[id]/*\n'
+put 'routes/[id]/x.ts' '// @ts-nocheck\n'; commit
+expect fail "a prohibition on a bracket route segment" "$explained"
+fresh; on_main 'routes/[id]/a.test.ts' 'it("a", f);\nit("b", f);\n'
+on_main .github/weakened-checks.conf 'prohibit tests-removed routes/[id]/*\n'
+put 'routes/[id]/a.test.ts' 'it("a", f);\n'
+put .github/weakened-checks-exceptions 'tests-removed routes/[id]/* the route tests moved to e2e\n'; commit
+expect pass "a tests-removed exception for a bracket pattern" "$explained"
+has "a tests-removed exception for a bracket pattern" '  - tests removed in routes/[id]/*: 1 deleted, 0 added (prohibited; allowed by .github/weakened-checks-exceptions: the route tests moved to e2e)'
+fresh; on_main .github/weakened-checks.conf 'test-path routes/[id]/checks/*\n'
+put 'routes/[id]/checks/x.ts' 'const c = d as unknown as E;\n'; commit
+expect pass "a test-path with a bracket segment" "$unexplained"
+
 # The historical gaps, each the diff it should have caught.
 # GAI-359: a crash test's loss limit loosened (in the nota suite too).
 fresh; on_main crates/a/src/tests.rs 'const LOSS_LIMIT: usize = 4; // check-bound\n'

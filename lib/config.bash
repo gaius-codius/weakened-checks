@@ -121,11 +121,20 @@ wc_parse_exceptions() {
 }
 
 on() { [[ $disabled != *" $1 "* ]]; }
+# wc_match TEXT PATTERN: whether TEXT matches a shell pattern from the config
+# or the exceptions file. A bracket expression matches either one character
+# of its class, as in bash, or its own text, so a route segment such as
+# routes/[id]/x.ts matches that path.
+wc_match() {
+  local literal=${2//\[/\\[}
+  literal=${literal//\]/\\]}
+  # shellcheck disable=SC2053 # the pattern is meant to match.
+  [[ $1 == $2 || $1 == $literal ]]
+}
 is_test_path() {
   local p
   for p in "${test_paths[@]}"; do
-    # shellcheck disable=SC2053 # the pattern is meant to match.
-    [[ $1 == $p ]] && return 0
+    wc_match "$1" "$p" && return 0
   done
   return 1
 }
@@ -133,8 +142,7 @@ excepted() { # rule, path; prints the reason
   local e rule pattern reason
   for e in "${exceptions[@]}"; do
     IFS=$'\t' read -r rule pattern reason <<<"$e"
-    # shellcheck disable=SC2053 # the pattern is meant to match.
-    if [[ $rule == "$1" && $2 == $pattern ]]; then
+    if [[ $rule == "$1" ]] && wc_match "$2" "$pattern"; then
       echo "$reason"
       return 0
     fi
