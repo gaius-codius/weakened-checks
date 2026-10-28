@@ -169,6 +169,35 @@ fresh; on_main src/UnitTests/a.ts 'it("a", f);\nit("b", f);\n'
 put src/UnitTests/a.ts 'it("a", f);\n'; commit
 expect pass "Swift's test paths don't count JS tests" "$unexplained"
 
+fresh; on_main Package.swift 'let package = Package(\n    name: "App",\n    platforms: [.iOS(.v17)],\n    swiftLanguageModes: [\n        .v6\n    ]\n)\n'
+put Package.swift 'let package = Package(\n    name: "App",\n    platforms: [.iOS(.v17)],\n    swiftLanguageModes: [\n        .v5\n    ]\n)\n'; commit
+expect fail "Swift: a language mode changed inside a multi-line list" "$unexplained"
+has "Swift: a language mode changed inside a multi-line list" '  - Swift settings changed in a Package.swift: Package.swift'
+fresh; on_main Package.swift 'let package = Package(\n    name: "App",\n    platforms: [\n        .iOS(.v17),\n    ]\n)\n'
+put Package.swift 'let package = Package(\n    name: "App",\n    platforms: [\n        .iOS(.v18),\n        .macOS(.v15),\n    ]\n)\n'; commit
+expect pass "Swift: platform versions changed in Package.swift" "$unexplained"
+fresh; on_main Tests/AppTests/ATests.swift '@Test(.enabled(if:\n    true\n)) func a() {}\n'
+put Tests/AppTests/ATests.swift '@Test(.enabled(if:\n    false\n)) func a() {}\n'; commit
+expect fail "Swift: a trait's condition changed on a line of its own" "$unexplained"
+has "Swift: a trait's condition changed on a line of its own" '  - added: Tests/AppTests/ATests.swift:2: false [swift-test-skip]'
+fresh; put Tests/AppTests/ATests.swift 'func a() throws {\n    Testing.withKnownIssue { try b() }\n    XCTest.XCTExpectFailure("slow")\n    throw XCTest.XCTSkip("slow")\n}\n'; commit
+run || true
+has "Swift: qualified skips" '  - added: Tests/AppTests/ATests.swift:2: Testing.withKnownIssue { try b() } [swift-test-skip]'
+has "Swift: qualified skips" '  - added: Tests/AppTests/ATests.swift:3: XCTest.XCTExpectFailure("slow") [swift-test-skip]'
+has "Swift: qualified skips" '  - added: Tests/AppTests/ATests.swift:4: throw XCTest.XCTSkip("slow") [swift-test-skip]'
+fresh; on_main Sources/App/A.swift 'func f() {\n    MainActor.assumeIsolated {\n        g()\n    }\n}\n'
+on_main Tests/AppTests/ATests.swift '@Test func a() {\n    withKnownIssue {\n        try b()\n    }\n}\n'
+put Sources/App/A.swift 'func f() {\n    MainActor.assumeIsolated {\n        g()\n        h()\n    }\n}\n'
+put Tests/AppTests/ATests.swift '@Test func a() {\n    withKnownIssue {\n        try b()\n        try c()\n    }\n}\n'; commit
+expect pass "Swift: lines added inside existing assumeIsolated and withKnownIssue closures" "$unexplained"
+fresh; on_main Tests/LogicTests/ATests.swift '@Test func a() {}\n@Test func b() {}\n'
+put Tests/LogicTests/ATests.swift '@Test\nfunc testA() {}\n'; commit
+expect fail "Swift: two tests replaced by one @Test over two lines" "$unexplained"
+has "Swift: two tests replaced by one @Test over two lines" '  - tests removed: 1 Swift tests deleted, 0 added'
+fresh; on_main Tests/LogicTests/ATests.swift '@Test\nfunc testA() {}\n@Test(\n    .tags(.slow)\n)\nfunc testB() {}\n'
+put Tests/LogicTests/ATests.swift '@Test func testA() {}\n@Test(.tags(.slow)) func testB() {}\n'; commit
+expect pass "Swift: @Test functions joined onto one line" "$unexplained"
+
 # Diff rules.
 fresh; on_main t.test.ts 'it("a", () => {});\nit("b", () => {});\n'; put t.test.ts 'it("a", () => {});\n'; commit
 expect fail "a TypeScript test removed" "$unexplained"

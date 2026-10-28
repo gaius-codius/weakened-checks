@@ -45,19 +45,21 @@ language: swift
 severity: warning
 message: actor isolation is bypassed
 rule:
-  kind: call_expression
-  has:
-    nthChild: 1
-    any:
-      # MainActor.assumeIsolated, or any actor's; Swift.unsafeBitCast.
-      - kind: navigation_expression
+  # The callee only, so a line added inside an existing trailing closure
+  # isn't a new finding. MainActor.assumeIsolated, or any actor's;
+  # unsafeBitCast, also as Swift.unsafeBitCast.
+  nthChild: 1
+  inside:
+    kind: call_expression
+  any:
+    - kind: navigation_expression
+      has:
+        kind: navigation_suffix
         has:
-          kind: navigation_suffix
-          has:
-            field: suffix
-            regex: '^(assumeIsolated|unsafeBitCast)$'
-      - kind: simple_identifier
-        regex: '^(assumeIsolated|unsafeBitCast)$'
+          field: suffix
+          regex: '^(assumeIsolated|unsafeBitCast)$'
+    - kind: simple_identifier
+      regex: '^(assumeIsolated|unsafeBitCast)$'
 ---
 id: swift-format-ignore
 language: swift
@@ -91,11 +93,23 @@ files:
 severity: warning
 message: a test is disabled
 rule:
-  # .disabled(...) or .enabled(if: ...) in @Test(...) or @Suite(...).
-  kind: prefix_expression
-  has:
-    field: target
-    regex: '^(disabled|enabled)$'
+  # .disabled(...) or .enabled(if: ...) in @Test(...) or @Suite(...), with
+  # its arguments, so a changed condition on a line of its own counts.
+  any:
+    - kind: call_expression
+      has:
+        nthChild: 1
+        kind: prefix_expression
+        has:
+          field: target
+          regex: '^(disabled|enabled)$'
+    - kind: prefix_expression
+      has:
+        field: target
+        regex: '^(disabled|enabled)$'
+      not:
+        inside:
+          kind: call_expression
   inside:
     stopBy: end
     kind: attribute
@@ -113,8 +127,17 @@ files:
 severity: warning
 message: a test is skipped or expected to fail
 rule:
-  kind: call_expression
-  has:
-    nthChild: 1
-    kind: simple_identifier
-    regex: '^(withKnownIssue|XCTSkip|XCTSkipIf|XCTSkipUnless|XCTExpectFailure)$'
+  # The callee only, as in swift-unsafe-isolation@call, also qualified
+  # (Testing.withKnownIssue, XCTest.XCTSkip).
+  nthChild: 1
+  inside:
+    kind: call_expression
+  any:
+    - kind: navigation_expression
+      has:
+        kind: navigation_suffix
+        has:
+          field: suffix
+          regex: '^(withKnownIssue|XCTSkip|XCTSkipIf|XCTSkipUnless|XCTExpectFailure)$'
+    - kind: simple_identifier
+      regex: '^(withKnownIssue|XCTSkip|XCTSkipIf|XCTSkipUnless|XCTExpectFailure)$'
