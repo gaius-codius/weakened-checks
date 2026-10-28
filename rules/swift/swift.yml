@@ -1,0 +1,120 @@
+# Swift: concurrency escape hatches, format and lint suppressions, and tests
+# that skip themselves (in test files only, since .disabled( is also a
+# SwiftUI modifier). Matched on the syntax tree, so the words in a string
+# don't count. One id can have several rules; each carries @suffix, which the
+# detector drops.
+id: swift-unchecked-sendable
+language: swift
+severity: warning
+message: Sendable is asserted, not checked
+rule:
+  # The grammar puts @unchecked as an attribute before the conformance, in a
+  # class, struct, enum or extension.
+  kind: attribute
+  regex: '^@\s*unchecked$'
+---
+id: swift-unsafe-isolation@modifier
+language: swift
+severity: warning
+message: actor isolation is bypassed
+rule:
+  any:
+    - kind: member_modifier
+      regex: '^nonisolated\s*\(\s*unsafe\s*\)$'
+    - kind: ownership_modifier
+      regex: '^unowned\s*\(\s*unsafe\s*\)$'
+    # On a local variable the grammar has no modifier, and reads
+    # nonisolated(unsafe) as a call.
+    - kind: call_expression
+      regex: '^nonisolated\s*\(\s*unsafe\s*\)$'
+---
+id: swift-unsafe-isolation@attribute
+language: swift
+severity: warning
+message: actor isolation is bypassed
+rule:
+  kind: attribute
+  any:
+    - regex: '^@\s*preconcurrency$'
+    - regex: '^@\s*_unsafeInheritExecutor$'
+    # @MainActor(unsafe), or any global actor's.
+    - regex: '^@\s*[A-Za-z_][A-Za-z0-9_]*\s*\(\s*unsafe\s*\)$'
+---
+id: swift-unsafe-isolation@call
+language: swift
+severity: warning
+message: actor isolation is bypassed
+rule:
+  kind: call_expression
+  has:
+    nthChild: 1
+    any:
+      # MainActor.assumeIsolated, or any actor's; Swift.unsafeBitCast.
+      - kind: navigation_expression
+        has:
+          kind: navigation_suffix
+          has:
+            field: suffix
+            regex: '^(assumeIsolated|unsafeBitCast)$'
+      - kind: simple_identifier
+        regex: '^(assumeIsolated|unsafeBitCast)$'
+---
+id: swift-format-ignore
+language: swift
+severity: warning
+message: formatting is skipped
+rule:
+  any:
+    - kind: comment
+    - kind: multiline_comment
+  regex: '^(//|/\*)\s*swift-format-ignore(-file)?\b'
+---
+id: swiftlint-disable
+language: swift
+severity: warning
+message: a SwiftLint rule is disabled
+rule:
+  any:
+    - kind: comment
+    - kind: multiline_comment
+  regex: '^(//|/\*)\s*swiftlint:disable\b'
+---
+id: swift-test-skip@trait
+language: swift
+files:
+  - 'Tests/**/*.swift'
+  - '**/Tests/**/*.swift'
+  - '*Tests/**/*.swift'
+  - '**/*Tests/**/*.swift'
+  - '*Tests.swift'
+  - '**/*Tests.swift'
+severity: warning
+message: a test is disabled
+rule:
+  # .disabled(...) or .enabled(if: ...) in @Test(...) or @Suite(...).
+  kind: prefix_expression
+  has:
+    field: target
+    regex: '^(disabled|enabled)$'
+  inside:
+    stopBy: end
+    kind: attribute
+    regex: '^@\s*(Testing\s*\.\s*)?(Test|Suite)\b'
+---
+id: swift-test-skip@call
+language: swift
+files:
+  - 'Tests/**/*.swift'
+  - '**/Tests/**/*.swift'
+  - '*Tests/**/*.swift'
+  - '**/*Tests/**/*.swift'
+  - '*Tests.swift'
+  - '**/*Tests.swift'
+severity: warning
+message: a test is skipped or expected to fail
+rule:
+  kind: call_expression
+  has:
+    nthChild: 1
+    kind: simple_identifier
+    regex: '^(withKnownIssue|XCTSkip|XCTSkipIf|XCTSkipUnless|XCTExpectFailure)$'

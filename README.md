@@ -10,7 +10,7 @@ nota's `check-weakened.sh` test suite runs here, unchanged, against this detecto
 | GitHub action | `action.yml` | `uses: gaius-codius/weakened-checks@<release SHA>` in a `pull_request` job |
 | Annotation rules | `rules/` (ast-grep) | Used by the detector; ast-grep is pinned in `scripts/install-ast-grep.sh` |
 | Built-in lists and config parser | `lib/config.bash` | Sourced by the detector, and by other scripts that read the same config |
-| Project config | `examples/` | nota's config; copy it as a starting point |
+| Project config | `examples/` | nota's config and a Swift package's; copy one as a starting point |
 
 ## Using it in CI
 
@@ -81,8 +81,9 @@ The detector compares `HEAD` with its merge base with `BASE` (`git diff BASE...H
 | `check-config` | path | changes a check-config path (the list is below), this config, or the exceptions file. A file moved between check-config paths is reported at both. |
 | `cargo-lint-levels` | diff | edits a lint table or a lint level in any `Cargo.toml`. Adding `[lints]` / `workspace = true` doesn't count. |
 | `cargo-workspace-lints` | path | adds, changes or moves a member `Cargo.toml` (`cargo-members`) that doesn't inherit `[workspace.lints]`, in a workspace that has some |
+| `swift-package-settings` | diff | adds or removes a line in any `Package.swift` (or `Package@swift-*.swift`) that sets the language mode, concurrency checking, warnings, `unsafeFlags`, upcoming or experimental features, or default isolation. Adding a dependency or a target without them doesn't count. |
 | `check-bound` | diff | changes, deletes or untags a line tagged `check-bound` (below) |
-| `tests-removed` | diff | deletes more tests than it adds: Rust `#[test]`/`#[proptest]`/`#[rstest]` in any file; Go `func Test`/`Fuzz` in `_test.go`; JS/TS `it(`/`test(` and Python `def test` in test paths. Counted over the whole diff, so moving a test isn't reported. A renamed file's tests count as leaving its old path, so renaming a test file out of the test paths is reported. |
+| `tests-removed` | diff | deletes more tests than it adds: Rust `#[test]`/`#[proptest]`/`#[rstest]` in any file; Go `func Test`/`Fuzz` in `_test.go`; JS/TS `it(`/`test(` and Python `def test` in test paths; Swift `@Test` and XCTest `func test…` in test paths, in `*Tests/` directories and in `*Tests.swift` files. Counted over the whole diff, so moving a test isn't reported. A renamed file's tests count as leaving its old path, so renaming a test file out of the test paths is reported. |
 | `snapshot` | path | modifies, deletes, or renames and modifies a snapshot or golden file (`snapshot-path`). A renamed one is prohibited where either its old or its new path is, and moving one unchanged out of a prohibited path is reported too. |
 | `rust-allow` | ast-grep | adds `#[allow(..)]`/`#[expect(..)]`, outer or inner, including inside `cfg_attr` and across lines |
 | `rust-ignore` | ast-grep | adds `#[ignore]`, also with a reason or under `cfg_attr` |
@@ -97,10 +98,15 @@ The detector compares `HEAD` with its merge base with `BASE` (`git diff BASE...H
 | `eslint-disable`, `biome-ignore` | ast-grep | adds an ESLint or Biome suppression comment |
 | `js-test-skip` | ast-grep | adds `it.skip`, `test.only`, `describe.skip`, `xit` and the like |
 | `py-test-skip` | ast-grep | adds `@pytest.mark.skip`/`skipif`/`xfail`, `@unittest.skip*` or `pytest.skip()` |
+| `swift-unchecked-sendable` | ast-grep | adds `@unchecked Sendable`, in a type or an extension |
+| `swift-unsafe-isolation` | ast-grep | adds `nonisolated(unsafe)`, `@preconcurrency` (on an import, a conformance or a declaration), `<Actor>.assumeIsolated`, `@MainActor(unsafe)` or another global actor's, `@_unsafeInheritExecutor`, `unsafeBitCast(` or `unowned(unsafe)` |
+| `swift-format-ignore` | ast-grep | adds a `// swift-format-ignore` or `// swift-format-ignore-file` comment |
+| `swiftlint-disable` | ast-grep | adds a `swiftlint:disable` comment, including `:next`, `:this` and `:previous` |
+| `swift-test-skip` | ast-grep | adds a `.disabled(…)` or `.enabled(if:)` trait to `@Test` or `@Suite`, `withKnownIssue`, `XCTSkip`, `XCTSkipIf`, `XCTSkipUnless` or `XCTExpectFailure`, in a test file (in `Tests/` or a `*Tests/` directory, or named `*Tests.swift`) |
 | `nosemgrep` | ast-grep | adds a `nosemgrep` comment (Rust, Go, TS/JS, Python, shell) |
 | `svelte-ignore` | regex | adds a `<!-- svelte-ignore -->` comment |
 
-The ast-grep rules only see comments and code, never strings: `#[doc = "may ignore"]` isn't an ignore. They run on the branch's copy of each changed file, and a match counts when any of its lines is added. TypeScript files use the TypeScript grammar. JavaScript and TSX use the TSX grammar.
+The ast-grep rules only see comments and code, never strings: `#[doc = "may ignore"]` isn't an ignore. They run on the branch's copy of each changed file, and a match counts when any of its lines is added. TypeScript files use the TypeScript grammar. JavaScript and TSX use the TSX grammar. Swift files use the Swift grammar.
 
 **Svelte.** ast-grep has no Svelte grammar, so in `.svelte` files a regex fallback checks the lines of `<script>` blocks for the TS/JS rules (`ts-*`, `eslint-disable`, `biome-ignore`, `ts-as-unknown`, `js-test-skip`). It checks every line for `nosemgrep` and `svelte-ignore`.
 
@@ -128,7 +134,7 @@ A `config-path`, `snapshot-path` or `cargo-members` entry that git rejects as a 
 |---|---|
 | `config-path PATHSPEC...` | Check-config paths (git pathspecs, so `:(glob)` works). The first use replaces the built-in list. `@defaults` brings the built-in entries back. |
 | `snapshot-path PATHSPEC...` | Snapshot and golden files. Built in: `*.snap`, `*.golden`, `**/__snapshots__/**`. |
-| `test-path PATTERN...` | Test files (shell patterns where `*` also matches `/`). These are used for `ts-as-unknown` and for counting JS/TS and Python tests. Built in: `*.test.*`, `*.spec.*`, `*__tests__/*`, `tests/*`, `test/*`, `*_test.go`, `test_*.py`, `testdata/*`, `e2e/*` and the like. |
+| `test-path PATTERN...` | Test files (shell patterns where `*` also matches `/`). These are used for `ts-as-unknown` and for counting JS/TS, Python and Swift tests. Built in: `*.test.*`, `*.spec.*`, `*__tests__/*`, `tests/*`, `test/*`, `*_test.go`, `test_*.py`, `testdata/*`, `e2e/*` and the like. |
 | `cargo-members PATHSPEC` | Crates that must inherit the workspace lints (built in: `:(glob)crates/*/Cargo.toml`). `none` turns this off. |
 | `bound-tag WORD` | The bound tag (built in: `check-bound`) |
 | `exceptions PATH` | The exceptions file (built in: `.github/weakened-checks-exceptions`), or `none` |
@@ -138,6 +144,8 @@ A `config-path`, `snapshot-path` or `cargo-members` entry that git rejects as a 
 In the shell patterns (`test-path`, `prohibit` and the exceptions file), a bracket expression matches either its own text or, as in bash, one character of its class. So `routes/orders/[id]/*` matches the route directory `routes/orders/[id]/`, and also `routes/orders/i/`. In the git pathspecs (`config-path`, `snapshot-path`), a bracket is a class, so write a bracket segment there as `*` or use `:(literal)`.
 
 The built-in check-config list covers CI workflows and actions, CODEOWNERS, git hook configs (lefthook, pre-commit, husky), `scripts/check-*`, the Rust toolchain, clippy, rustfmt, typos, deny, nextest, cargo-mutants and `.cargo/config`, golangci-lint, `tsconfig*.json`, Biome, ESLint, Vitest, Jest, Playwright and Stryker configs, semgrep and gitleaks configs, and codecov. `lib/config.bash` holds the exact list. A project with nothing to prohibit can go without a config file.
+
+swift-format's `.swift-format` and SwiftLint's `.swiftlint.yml` aren't in the built-in list. A Swift project adds them with `config-path @defaults .swift-format .swiftlint.yml`, as `examples/swift-app.conf` does.
 
 For example, a project that keeps clinical code under `services/clinical/`:
 
@@ -149,7 +157,7 @@ prohibit ts-as-unknown services/clinical/*
 prohibit tests-removed services/clinical/*
 ```
 
-`examples/nota.conf` reproduces nota's former check-config list. It prohibits nothing.
+`examples/nota.conf` reproduces nota's former check-config list. It prohibits nothing. `examples/swift-app.conf` is the Swift config above.
 
 ## The exceptions file
 

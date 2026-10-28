@@ -6,6 +6,7 @@ ruleDirs:
   - go
   - ts
   - python
+  - swift
   - any
 # JavaScript is parsed with the TSX grammar (a superset of it), so each
 # TypeScript rule is written twice: once for typescript, once for tsx.
