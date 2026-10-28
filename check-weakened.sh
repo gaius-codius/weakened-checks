@@ -234,8 +234,9 @@ fi
 # checks: the language mode, concurrency checking, warnings, unsafe flags and
 # feature flags. A line added only for a new dependency or target doesn't
 # mention them, so it isn't counted. A line holding a language-mode value
-# (.v6, .version("6")) counts too, so a mode changed inside a multi-line list
-# is seen; platform versions (.iOS(.v17)) don't.
+# (.v4 to .v7, .version("6")) or a warning level (.error, .warning) counts
+# too, so a value changed on a line of its own is seen; a line with a
+# platform call (.iOS(.v17)) doesn't.
 if on swift-package-settings; then
   while IFS= read -r f; do
     [[ -n $f ]] && finding swift-package-settings "$f" "Swift settings changed in a Package.swift: $f"
@@ -244,7 +245,8 @@ if on swift-package-settings; then
       line = substr($0, length($1) + 2)
       if (line !~ /^[-+]/) next
       setting = line ~ /swiftLanguageMode|swiftLanguageVersions|unsafeFlags|strict-concurrency|StrictConcurrency|treatAllWarnings|treatWarning|enableUpcomingFeature|enableExperimentalFeature|defaultIsolation|-suppress-warnings|-warnings-as-errors/
-      mode = (line ~ /\.v[0-9]+([^A-Za-z0-9_]|$)/ || line ~ /\.version[ \t]*\(/) &&
+      mode = (line ~ /\.v[4-7](_[0-9]+)?([^A-Za-z0-9_]|$)/ || line ~ /\.version[ \t]*\(/ ||
+        line ~ /\.(error|warning)([^A-Za-z0-9_]|$)/) &&
         line !~ /\.(iOS|macOS|tvOS|watchOS|visionOS|macCatalyst|driverKit)[ \t]*\(/
       if (!setting && !mode) next
       if (!($1 in seen)) { seen[$1] = 1; print $1 }

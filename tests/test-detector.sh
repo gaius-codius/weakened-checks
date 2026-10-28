@@ -198,6 +198,20 @@ fresh; on_main Tests/LogicTests/ATests.swift '@Test\nfunc testA() {}\n@Test(\n  
 put Tests/LogicTests/ATests.swift '@Test func testA() {}\n@Test(.tags(.slow)) func testB() {}\n'; commit
 expect pass "Swift: @Test functions joined onto one line" "$unexplained"
 
+fresh; on_main Package.swift 'let package = Package(\n    name: "App",\n    targets: [\n        .target(name: "Logic", swiftSettings: [\n            .treatAllWarnings(as:\n                .error\n            ),\n        ]),\n    ]\n)\n'
+put Package.swift 'let package = Package(\n    name: "App",\n    targets: [\n        .target(name: "Logic", swiftSettings: [\n            .treatAllWarnings(as:\n                .warning\n            ),\n        ]),\n    ]\n)\n'; commit
+expect fail "Swift: a warning level changed on a line of its own" "$unexplained"
+has "Swift: a warning level changed on a line of its own" '  - Swift settings changed in a Package.swift: Package.swift'
+fresh; on_main Package.swift 'let package = Package(\n    name: "App",\n    platforms: [\n        .iOS(\n            .v17\n        ),\n    ]\n)\n'
+put Package.swift 'let package = Package(\n    name: "App",\n    platforms: [\n        .iOS(\n            .v18\n        ),\n    ]\n)\n'; commit
+expect pass "Swift: a platform version changed on a line of its own" "$unexplained"
+fresh; on_main Tests/AppTests/ATests.swift 'func testA() throws {\n    try XCTSkipIf(\n        false\n    )\n    withKnownIssue(isIntermittent:\n        false\n    ) {\n        try b()\n    }\n}\n'
+put Tests/AppTests/ATests.swift 'func testA() throws {\n    try XCTSkipIf(\n        true\n    )\n    withKnownIssue(isIntermittent:\n        true\n    ) {\n        try b()\n        try c()\n    }\n}\n'; commit
+expect fail "Swift: a skip condition changed on a line of its own" "$unexplained"
+has "Swift: a skip condition changed on a line of its own" '  - added: Tests/AppTests/ATests.swift:3: true [swift-test-skip]'
+has "Swift: a skip condition changed on a line of its own" '  - added: Tests/AppTests/ATests.swift:6: true [swift-test-skip]'
+lacks "Swift: a line added in the closure isn't a finding" 'ATests.swift:9:'
+
 # Diff rules.
 fresh; on_main t.test.ts 'it("a", () => {});\nit("b", () => {});\n'; put t.test.ts 'it("a", () => {});\n'; commit
 expect fail "a TypeScript test removed" "$unexplained"

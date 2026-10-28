@@ -141,3 +141,34 @@ rule:
           regex: '^(withKnownIssue|XCTSkip|XCTSkipIf|XCTSkipUnless|XCTExpectFailure)$'
     - kind: simple_identifier
       regex: '^(withKnownIssue|XCTSkip|XCTSkipIf|XCTSkipUnless|XCTExpectFailure)$'
+---
+id: swift-test-skip@arguments
+language: swift
+files:
+  - 'Tests/**/*.swift'
+  - '**/Tests/**/*.swift'
+  - '*Tests/**/*.swift'
+  - '**/*Tests/**/*.swift'
+  - '*Tests.swift'
+  - '**/*Tests.swift'
+severity: warning
+message: a test is skipped or expected to fail
+rule:
+  # The arguments of those calls (a condition on a line of its own, say),
+  # but not a trailing closure's body.
+  kind: value_arguments
+  inside:
+    kind: call_suffix
+    inside:
+      kind: call_expression
+      has:
+        nthChild: 1
+        any:
+          - kind: navigation_expression
+            has:
+              kind: navigation_suffix
+              has:
+                field: suffix
+                regex: '^(withKnownIssue|XCTSkip|XCTSkipIf|XCTSkipUnless|XCTExpectFailure)$'
+          - kind: simple_identifier
+            regex: '^(withKnownIssue|XCTSkip|XCTSkipIf|XCTSkipUnless|XCTExpectFailure)$'
