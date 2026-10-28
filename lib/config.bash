@@ -13,7 +13,9 @@ rules=(check-config cargo-lint-levels cargo-workspace-lints check-bound tests-re
   rust-allow rust-ignore rust-rustfmt-skip rust-no-mangle rust-unsafe
   go-nolint go-test-skip
   ts-nocheck ts-ignore ts-expect-error ts-as-unknown eslint-disable biome-ignore js-test-skip
-  svelte-ignore py-test-skip nosemgrep)
+  svelte-ignore py-test-skip nosemgrep
+  swift-unchecked-sendable swift-unsafe-isolation swift-format-ignore swiftlint-disable swift-test-skip
+  swift-package-settings)
 default_config_paths=(
   .github/workflows .github/actions .github/CODEOWNERS CODEOWNERS
   lefthook.yml lefthook.yaml .lefthook.yml .pre-commit-config.yaml .husky

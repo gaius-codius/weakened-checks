@@ -108,6 +108,110 @@ has "Svelte" '  - added: App.svelte:3: const a = b as unknown as C; [ts-as-unkno
 has "Svelte" '  - added: App.svelte:7: <!-- svelte-ignore a11y_click_events_have_key_events --> [svelte-ignore]'
 lacks "Svelte markup isn't script" 'App.svelte:8:'
 
+# Swift.
+fresh; put Sources/App/A.swift '@preconcurrency import Foundation\nfinal class A: Base, @unchecked Sendable {}\nextension B: @unchecked Sendable {}\nextension C: @preconcurrency P {}\nnonisolated(unsafe) var x = 1\nfunc f() {\n    nonisolated(unsafe) let q = makeQ()\n    MainActor.assumeIsolated { g() }\n    _ = unsafeBitCast(a, to: Int.self)\n}\n@MainActor(unsafe) func h() {}\n@_unsafeInheritExecutor func i() async {}\nclass D { unowned(unsafe) var e: E }\n// swift-format-ignore\n// swift-format-ignore-file\nlet y = z // swiftlint:disable:this force_cast\n/* swiftlint:disable all */\n'
+put Tests/AppTests/ATests.swift '@Test(.disabled("flaky")) func a() {}\n@Suite(.enabled(if: false)) struct S {}\n@Test func b() { withKnownIssue { try c() } }\nfinal class T: XCTestCase {\n    func testD() throws { throw XCTSkip("slow") }\n    func testE() throws { try XCTSkipIf(true) }\n}\n'; commit
+expect fail "Swift" "$unexplained"
+has "Swift" '  - added: Sources/App/A.swift:1: @preconcurrency import Foundation [swift-unsafe-isolation]'
+has "Swift" '  - added: Sources/App/A.swift:2: final class A: Base, @unchecked Sendable {} [swift-unchecked-sendable]'
+has "Swift" '  - added: Sources/App/A.swift:3: extension B: @unchecked Sendable {} [swift-unchecked-sendable]'
+has "Swift" '  - added: Sources/App/A.swift:4: extension C: @preconcurrency P {} [swift-unsafe-isolation]'
+has "Swift" '  - added: Sources/App/A.swift:5: nonisolated(unsafe) var x = 1 [swift-unsafe-isolation]'
+has "Swift" '  - added: Sources/App/A.swift:7: nonisolated(unsafe) let q = makeQ() [swift-unsafe-isolation]'
+has "Swift" '  - added: Sources/App/A.swift:8: MainActor.assumeIsolated { g() } [swift-unsafe-isolation]'
+has "Swift" '  - added: Sources/App/A.swift:9: _ = unsafeBitCast(a, to: Int.self) [swift-unsafe-isolation]'
+has "Swift" '  - added: Sources/App/A.swift:11: @MainActor(unsafe) func h() {} [swift-unsafe-isolation]'
+has "Swift" '  - added: Sources/App/A.swift:12: @_unsafeInheritExecutor func i() async {} [swift-unsafe-isolation]'
+has "Swift" '  - added: Sources/App/A.swift:13: class D { unowned(unsafe) var e: E } [swift-unsafe-isolation]'
+has "Swift" '  - added: Sources/App/A.swift:14: // swift-format-ignore [swift-format-ignore]'
+has "Swift" '  - added: Sources/App/A.swift:15: // swift-format-ignore-file [swift-format-ignore]'
+has "Swift" '  - added: Sources/App/A.swift:16: let y = z // swiftlint:disable:this force_cast [swiftlint-disable]'
+has "Swift" '  - added: Sources/App/A.swift:17: /* swiftlint:disable all */ [swiftlint-disable]'
+has "Swift" '  - added: Tests/AppTests/ATests.swift:1: @Test(.disabled("flaky")) func a() {} [swift-test-skip]'
+has "Swift" '  - added: Tests/AppTests/ATests.swift:2: @Suite(.enabled(if: false)) struct S {} [swift-test-skip]'
+has "Swift" '  - added: Tests/AppTests/ATests.swift:3: @Test func b() { withKnownIssue { try c() } } [swift-test-skip]'
+has "Swift" '  - added: Tests/AppTests/ATests.swift:5: func testD() throws { throw XCTSkip("slow") } [swift-test-skip]'
+has "Swift" '  - added: Tests/AppTests/ATests.swift:6: func testE() throws { try XCTSkipIf(true) } [swift-test-skip]'
+expect pass "Swift, explained" "$explained"
+fresh; put Sources/App/S.swift 'let a = "@unchecked Sendable, nonisolated(unsafe), @preconcurrency"\nlet b = "// swiftlint:disable all"\nlet c = """\n// swift-format-ignore\nMainActor.assumeIsolated\n"""\n'; commit
+expect pass "Swift: the patterns in string literals" "$unexplained"
+fresh; on_main Sources/App/A.swift 'final class A: @unchecked Sendable {\n    var a = 1\n}\n'
+put Sources/App/A.swift 'final class A: @unchecked Sendable {\n    var a = 1\n    var b = 2\n}\n'; commit
+expect pass "Swift: a line added next to an existing @unchecked Sendable" "$unexplained"
+fresh; put Sources/App/V.swift 'struct V: View {\n    var body: some View { Button("Go") {}.disabled(true) }\n}\n'; put Tests/AppTests/VTests.swift 'func check(v: V) { v.button.disabled(true) }\n'; commit
+expect pass "Swift: the SwiftUI .disabled modifier" "$unexplained"
+fresh; put Sources/App/T.swift '@Test(.disabled("x")) func a() {}\n'; commit
+expect pass "Swift: a test trait outside the test files" "$unexplained"
+pkg='// swift-tools-version: 6.2\nlet package = Package(\n    name: "App",\n    dependencies: [\n        .package(url: "https://example.invalid/a", from: "1.0.0"),\n    ],\n    targets: [\n        .target(name: "Logic", swiftSettings: [\n            .enableUpcomingFeature("ExistentialAny"),\n            .treatAllWarnings(as: .error),\n        ]),\n    ],\n    swiftLanguageModes: [.v6]\n)\n'
+fresh; on_main Package.swift "$pkg"
+put Package.swift "${pkg/'            .treatAllWarnings(as: .error),\n'/}"; commit
+expect fail "Swift: warnings no longer errors in Package.swift" "$unexplained"
+has "Swift: warnings no longer errors in Package.swift" '  - Swift settings changed in a Package.swift: Package.swift'
+fresh; on_main app/Package.swift "$pkg"
+put app/Package.swift "${pkg/'.v6'/'.v5'}"; commit
+expect fail "Swift: the language mode lowered" "$unexplained"
+has "Swift: the language mode lowered" '  - Swift settings changed in a Package.swift: app/Package.swift'
+fresh; on_main Package.swift "$pkg"
+put Package.swift "${pkg/'    ],\n    targets'/'        .package(url: "https://example.invalid/b", from: "2.0.0"),\n    ],\n    targets'}"; commit
+expect pass "Swift: a dependency added to Package.swift" "$unexplained"
+fresh; on_main Tests/LogicTests/ATests.swift '@Test func a() {}\n@Test("b") func b() {}\n'
+put Tests/LogicTests/ATests.swift '@Test func a() {}\n'; commit
+expect fail "Swift: a Swift Testing test removed" "$unexplained"
+has "Swift: a Swift Testing test removed" '  - tests removed: 1 Swift tests deleted, 0 added'
+fresh; on_main LogicTests/ATests.swift 'final class A: XCTestCase {\n    func testA() {}\n    override func testB() async throws {}\n}\n'
+git rm -q LogicTests/ATests.swift; commit
+expect fail "Swift: an XCTest file deleted" "$unexplained"
+has "Swift: an XCTest file deleted" '  - tests removed: 2 Swift tests deleted, 0 added'
+fresh; on_main Tests/LogicTests/ATests.swift '@Test func a() {}\n@Test func b() {}\n'
+put Tests/LogicTests/ATests.swift '@Test func a() {}\n'; put Tests/LogicTests/BTests.swift '@Test func b() {}\n'; commit
+expect pass "Swift: a test moved to another file" "$unexplained"
+fresh; on_main src/UnitTests/a.ts 'it("a", f);\nit("b", f);\n'
+put src/UnitTests/a.ts 'it("a", f);\n'; commit
+expect pass "Swift's test paths don't count JS tests" "$unexplained"
+
+fresh; on_main Package.swift 'let package = Package(\n    name: "App",\n    platforms: [.iOS(.v17)],\n    swiftLanguageModes: [\n        .v6\n    ]\n)\n'
+put Package.swift 'let package = Package(\n    name: "App",\n    platforms: [.iOS(.v17)],\n    swiftLanguageModes: [\n        .v5\n    ]\n)\n'; commit
+expect fail "Swift: a language mode changed inside a multi-line list" "$unexplained"
+has "Swift: a language mode changed inside a multi-line list" '  - Swift settings changed in a Package.swift: Package.swift'
+fresh; on_main Package.swift 'let package = Package(\n    name: "App",\n    platforms: [\n        .iOS(.v17),\n    ]\n)\n'
+put Package.swift 'let package = Package(\n    name: "App",\n    platforms: [\n        .iOS(.v18),\n        .macOS(.v15),\n    ]\n)\n'; commit
+expect pass "Swift: platform versions changed in Package.swift" "$unexplained"
+fresh; on_main Tests/AppTests/ATests.swift '@Test(.enabled(if:\n    true\n)) func a() {}\n'
+put Tests/AppTests/ATests.swift '@Test(.enabled(if:\n    false\n)) func a() {}\n'; commit
+expect fail "Swift: a trait's condition changed on a line of its own" "$unexplained"
+has "Swift: a trait's condition changed on a line of its own" '  - added: Tests/AppTests/ATests.swift:2: false [swift-test-skip]'
+fresh; put Tests/AppTests/ATests.swift 'func a() throws {\n    Testing.withKnownIssue { try b() }\n    XCTest.XCTExpectFailure("slow")\n    throw XCTest.XCTSkip("slow")\n}\n'; commit
+run || true
+has "Swift: qualified skips" '  - added: Tests/AppTests/ATests.swift:2: Testing.withKnownIssue { try b() } [swift-test-skip]'
+has "Swift: qualified skips" '  - added: Tests/AppTests/ATests.swift:3: XCTest.XCTExpectFailure("slow") [swift-test-skip]'
+has "Swift: qualified skips" '  - added: Tests/AppTests/ATests.swift:4: throw XCTest.XCTSkip("slow") [swift-test-skip]'
+fresh; on_main Sources/App/A.swift 'func f() {\n    MainActor.assumeIsolated {\n        g()\n    }\n}\n'
+on_main Tests/AppTests/ATests.swift '@Test func a() {\n    withKnownIssue {\n        try b()\n    }\n}\n'
+put Sources/App/A.swift 'func f() {\n    MainActor.assumeIsolated {\n        g()\n        h()\n    }\n}\n'
+put Tests/AppTests/ATests.swift '@Test func a() {\n    withKnownIssue {\n        try b()\n        try c()\n    }\n}\n'; commit
+expect pass "Swift: lines added inside existing assumeIsolated and withKnownIssue closures" "$unexplained"
+fresh; on_main Tests/LogicTests/ATests.swift '@Test func a() {}\n@Test func b() {}\n'
+put Tests/LogicTests/ATests.swift '@Test\nfunc testA() {}\n'; commit
+expect fail "Swift: two tests replaced by one @Test over two lines" "$unexplained"
+has "Swift: two tests replaced by one @Test over two lines" '  - tests removed: 1 Swift tests deleted, 0 added'
+fresh; on_main Tests/LogicTests/ATests.swift '@Test\nfunc testA() {}\n@Test(\n    .tags(.slow)\n)\nfunc testB() {}\n'
+put Tests/LogicTests/ATests.swift '@Test func testA() {}\n@Test(.tags(.slow)) func testB() {}\n'; commit
+expect pass "Swift: @Test functions joined onto one line" "$unexplained"
+
+fresh; on_main Package.swift 'let package = Package(\n    name: "App",\n    targets: [\n        .target(name: "Logic", swiftSettings: [\n            .treatAllWarnings(as:\n                .error\n            ),\n        ]),\n    ]\n)\n'
+put Package.swift 'let package = Package(\n    name: "App",\n    targets: [\n        .target(name: "Logic", swiftSettings: [\n            .treatAllWarnings(as:\n                .warning\n            ),\n        ]),\n    ]\n)\n'; commit
+expect fail "Swift: a warning level changed on a line of its own" "$unexplained"
+has "Swift: a warning level changed on a line of its own" '  - Swift settings changed in a Package.swift: Package.swift'
+fresh; on_main Package.swift 'let package = Package(\n    name: "App",\n    platforms: [\n        .iOS(\n            .v17\n        ),\n    ]\n)\n'
+put Package.swift 'let package = Package(\n    name: "App",\n    platforms: [\n        .iOS(\n            .v18\n        ),\n    ]\n)\n'; commit
+expect pass "Swift: a platform version changed on a line of its own" "$unexplained"
+fresh; on_main Tests/AppTests/ATests.swift 'func testA() throws {\n    try XCTSkipIf(\n        false\n    )\n    withKnownIssue(isIntermittent:\n        false\n    ) {\n        try b()\n    }\n}\n'
+put Tests/AppTests/ATests.swift 'func testA() throws {\n    try XCTSkipIf(\n        true\n    )\n    withKnownIssue(isIntermittent:\n        true\n    ) {\n        try b()\n        try c()\n    }\n}\n'; commit
+expect fail "Swift: a skip condition changed on a line of its own" "$unexplained"
+has "Swift: a skip condition changed on a line of its own" '  - added: Tests/AppTests/ATests.swift:3: true [swift-test-skip]'
+has "Swift: a skip condition changed on a line of its own" '  - added: Tests/AppTests/ATests.swift:6: true [swift-test-skip]'
+lacks "Swift: a line added in the closure isn't a finding" 'ATests.swift:9:'
+
 # Diff rules.
 fresh; on_main t.test.ts 'it("a", () => {});\nit("b", () => {});\n'; put t.test.ts 'it("a", () => {});\n'; commit
 expect fail "a TypeScript test removed" "$unexplained"

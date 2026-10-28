@@ -230,6 +230,29 @@ if on cargo-lint-levels; then
     }')
 fi
 
+# Swift settings in a Package.swift that loosen or tighten what the compiler
+# checks: the language mode, concurrency checking, warnings, unsafe flags and
+# feature flags. A line added only for a new dependency or target doesn't
+# mention them, so it isn't counted. A line holding a language-mode value
+# (.v4 to .v7, .version("6")) or a warning level (.error, .warning) counts
+# too, so a value changed on a line of its own is seen; a line with a
+# platform call (.iOS(.v17)) doesn't.
+if on swift-package-settings; then
+  while IFS= read -r f; do
+    [[ -n $f ]] && finding swift-package-settings "$f" "Swift settings changed in a Package.swift: $f"
+  done < <(diff_lines -- ':(glob)**/Package.swift' ':(glob)**/Package@swift-*.swift' | awk -F'\t' '
+    {
+      line = substr($0, length($1) + 2)
+      if (line !~ /^[-+]/) next
+      setting = line ~ /swiftLanguageMode|swiftLanguageVersions|unsafeFlags|strict-concurrency|StrictConcurrency|treatAllWarnings|treatWarning|enableUpcomingFeature|enableExperimentalFeature|defaultIsolation|-suppress-warnings|-warnings-as-errors/
+      mode = (line ~ /\.v[4-7](_[0-9]+)?([^A-Za-z0-9_]|$)/ || line ~ /\.version[ \t]*\(/ ||
+        line ~ /\.(error|warning)([^A-Za-z0-9_]|$)/) &&
+        line !~ /\.(iOS|macOS|tvOS|watchOS|visionOS|macCatalyst|driverKit)[ \t]*\(/
+      if (!setting && !mode) next
+      if (!($1 in seen)) { seen[$1] = 1; print $1 }
+    }')
+fi
+
 # A crate that doesn't inherit the workspace lints has none of them. Only in
 # a workspace that has lints to inherit.
 if on cargo-workspace-lints && [[ $cargo_members != none ]] &&
@@ -251,7 +274,7 @@ fi
 # Annotations that silence a check or skip a test, on lines the branch adds:
 # ast-grep rules (rules/) on the branch's copy of each changed file, and a
 # regex fallback for .svelte files, which ast-grep can't parse.
-ast_exts=('*.rs' '*.go' '*.ts' '*.mts' '*.cts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' '*.py' '*.sh' '*.bash')
+ast_exts=('*.rs' '*.go' '*.ts' '*.mts' '*.cts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' '*.py' '*.sh' '*.bash' '*.swift')
 # Added line ranges: "path<TAB>first<TAB>last".
 gitq diff -U0 --no-color --no-ext-diff --diff-filter=AMR "$mb" "$head" -- "${ast_exts[@]}" '*.svelte' |
   awk '
@@ -367,7 +390,8 @@ fi
 
 # Tests removed: more test declarations deleted than added, per language
 # (Rust's #[test] attributes in any file; Go, JavaScript, TypeScript and
-# Python test functions in test files). Counted over the whole diff, so a
+# Python test functions in test files; Swift's @Test and XCTest's test
+# methods in test files or Swift test targets). Counted over the whole diff, so a
 # test moved between files isn't reported. Without rename detection, so a
 # renamed file's tests count as leaving its old path and arriving at its new
 # one: a prohibition's pattern, or the test paths, can't be left by a rename.
@@ -390,10 +414,37 @@ test_counts() { # prints "language<TAB>path<TAB>removed<TAB>added" per file
         if (sign == "-") removed[key]++; else added[key]++
       }
       END { for (i = 1; i <= n; i++) print keys[i] "\t" removed[keys[i]] + 0 "\t" added[keys[i]] + 0 }'
+  # Swift: a test is an @Test attribute, or a `func test…` with no @Test
+  # since the last func (an XCTest method), so an @Test function written
+  # over two lines counts once. That needs the lines around a change, so each
+  # changed file's tests are counted whole, before and after, and the
+  # difference is what was removed or added.
+  local status f before after
+  while IFS=$'\t' read -r status f; do
+    before=0 after=0
+    [[ $status == A ]] || before=$(git cat-file blob "$mb:$f" | swift_tests)
+    [[ $status == D ]] || after=$(git cat-file blob "$head:$f" | swift_tests)
+    if (( before > after )); then printf 'swift\t%s\t%s\t0\n' "$f" $((before - after))
+    elif (( after > before )); then printf 'swift\t%s\t0\t%s\n' "$f" $((after - before))
+    fi
+  done < <(gitq diff --name-status --no-renames "$mb" "$head" -- '*.swift')
 }
+swift_tests() { # counts the Swift tests in a file on stdin
+  awk '
+    /^[ \t]*@(Testing\.)?Test([ \t(]|$)/ { n++; attr = 1 }
+    /(^|[ \t])func[ \t]/ {
+      if (!attr && $0 ~ /^[ \t]*([@A-Za-z_][A-Za-z0-9_().]*[ \t]+)*func[ \t]+test[A-Za-z0-9_]*[ \t]*\(/) n++
+      attr = 0
+    }
+    END { print n + 0 }'
+}
+# Swift's test targets are named *Tests by convention, in Tests/ or not. They
+# count for Swift only, so the test paths for the other languages stay as
+# they were.
+is_swift_test_path() { [[ $1 == *Tests/* || $1 == *Tests.swift ]]; }
 test_counts | while IFS=$'\t' read -r lang f r a; do
   # Rust's attributes count anywhere; the other languages only in test files.
-  if [[ $lang == rust ]] || is_test_path "$f"; then printf '%s\t%s\t%s\t%s\n' "$lang" "$f" "$r" "$a"; fi
+  if [[ $lang == rust ]] || is_test_path "$f" || { [[ $lang == swift ]] && is_swift_test_path "$f"; }; then printf '%s\t%s\t%s\t%s\n' "$lang" "$f" "$r" "$a"; fi
 done >"$tmp/tests"
 if on tests-removed; then
   declare -A t_removed=() t_added=()
@@ -401,7 +452,7 @@ if on tests-removed; then
     t_removed[$lang]=$((${t_removed[$lang]:-0} + r))
     t_added[$lang]=$((${t_added[$lang]:-0} + a))
   done <"$tmp/tests"
-  for lang in rust go js python; do
+  for lang in rust go js python swift; do
     r=${t_removed[$lang]:-0} a=${t_added[$lang]:-0}
     (( r > a )) || continue
     case $lang in
@@ -409,6 +460,7 @@ if on tests-removed; then
       go) msg="tests removed: $r Go test functions deleted, $a added" ;;
       js) msg="tests removed: $r JavaScript or TypeScript tests deleted, $a added" ;;
       python) msg="tests removed: $r Python test functions deleted, $a added" ;;
+      swift) msg="tests removed: $r Swift tests deleted, $a added" ;;
     esac
     finding tests-removed "" "$msg"
   done
